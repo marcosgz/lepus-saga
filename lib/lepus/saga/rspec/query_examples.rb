@@ -278,6 +278,38 @@ RSpec.shared_examples "a lepus saga query store" do
 
       expect(store.finished_executions(from: hour, to: hour + hours(1))).to eq(executions: [], counts: {})
     end
+
+    it "lists, without counting, the executions that finished from listed_from" do
+      before = query_execution(saga_name: invoice, status: "failed", finished_at: hour - minutes(1))
+      query_execution(status: "completed", finished_at: hour - minutes(5))
+      inside = query_execution(status: "completed", finished_at: hour + minutes(1))
+
+      result = store.finished_executions(from: hour, to: hour + hours(1), listed_from: hour - minutes(2), per_saga: 5)
+
+      expect(ids(result[:executions])).to eq([inside.id, before.id])
+      expect(result[:counts]).to eq([checkout, "completed"] => 1)
+    end
+  end
+
+  describe "#executed_steps" do
+    it "names the steps each execution ran forward, keyed by id, every id present" do
+      failed = query_execution(status: "failed")
+      query_attempt(failed, step_name: "reserve")
+      query_attempt(failed, step_name: "charge", status: "failed")
+      query_attempt(failed, step_name: "charge", attempt: 2, status: "failed")
+      compensated = query_execution(status: "compensated")
+      query_attempt(compensated, step_name: "reserve")
+      query_attempt(compensated, step_name: "reserve", direction: "compensate")
+      untouched = query_execution
+
+      steps = store.executed_steps([failed, compensated, untouched])
+
+      expect(steps.keys).to contain_exactly(failed.id, compensated.id, untouched.id)
+      expect(steps[failed.id]).to contain_exactly("reserve", "charge")
+      expect(steps[compensated.id]).to eq(["reserve"])
+      expect(steps[untouched.id]).to eq([])
+      expect(store.executed_steps([])).to eq({})
+    end
   end
 
   describe "progress and error filters" do

@@ -158,22 +158,31 @@ module Lepus
         # Executions that finished since `since` (the `now` of an earlier
         # response), per saga line: the latest `per_saga` of them with the
         # steps they passed, and counts by status of every one, so a live
-        # view can finish or replay them without losing any.
+        # view can finish or replay them without losing any. `replay_from`
+        # (before `since`) also lists, without counting, the ones that
+        # finished from then on, for writes that landed after the last poll.
         def recent(request)
           since = time(request, "since") || raise(ArgumentError, "since must be an ISO 8601 time")
           now = Time.now.utc
           raise ArgumentError, "since must be before now" unless since < now
 
+          replay_from = time(request, "replay_from")
+          replay_from = nil if replay_from && replay_from >= since
           per_saga = integer(request, "per_saga", default: 8, range: 1..50)
           limit = integer(request, "limit", default: 100, range: 1..500)
-          result = store.finished_executions(from: since, to: now, saga_name: list(request, "saga"), per_saga: per_saga, limit: limit)
-          lines = result[:counts].group_by { |(saga, _status), _count| saga }.sort_by(&:first).map do |saga, counts|
-            executions = result[:executions].select { |execution| execution.saga_name == saga }
+          result = store.finished_executions(
+            from: since, to: now, listed_from: replay_from, saga_name: list(request, "saga"), per_saga: per_saga, limit: limit
+          )
+          steps = store.executed_steps(result[:executions].reject { |execution| execution.status == "completed" })
+          by_saga = result[:executions].group_by(&:saga_name)
+          counts = result[:counts].group_by { |(saga, _status), _count| saga }
+          lines = (by_saga.keys | counts.keys).sort.map do |saga|
+            line_counts = counts.fetch(saga, [])
             {
               saga_name: saga,
-              total: counts.sum(&:last),
-              counts: counts.to_h { |(_saga, status), count| [status, count] },
-              executions: executions.map { |execution| Serializer.finished(execution, store.step_attempts(execution)) }
+              total: line_counts.sum(&:last),
+              counts: line_counts.to_h { |(_saga, status), count| [status, count] },
+              executions: by_saga.fetch(saga, []).map { |execution| Serializer.finished(execution, steps.fetch(execution.id, [])) }
             }
           end
           {now: Serializer.time(now), since: Serializer.time(since), lines: lines}

@@ -116,6 +116,16 @@ module Lepus
           raise NotImplementedError
         end
 
+        # Names of the steps each of `executions` ran forward (attempts in the
+        # execute direction, whatever their status), as a Hash keyed by
+        # execution id, every id present. Stores override it to read them in
+        # one query.
+        def executed_steps(executions)
+          executions.to_h do |execution|
+            [execution.id, step_attempts(execution).select { |attempt| attempt.direction == "execute" }.map(&:step_name).uniq]
+          end
+        end
+
         # Number of attempts of `execution` for this step, direction and epoch,
         # whatever their status.
         def count_step_attempts(execution, step_name:, direction:, epoch:)
@@ -195,12 +205,16 @@ module Lepus
         # takes a value or a list. Returns `{executions: [...], counts:
         # {[saga_name, status] => n}}`, the counts covering every execution
         # that finished in the window, so a caller can tell how many the
-        # limits left out. Built on #list_executions and #count_executions.
-        def finished_executions(from:, to:, saga_name: nil, per_saga: nil, limit: 100)
-          window = {saga_name: saga_name, finished_from: from, finished_to: to}
-          counts = count_executions(group_by: %i[saga_name status], **window)
+        # limits left out. `listed_from` (at most `from`) widens the listed
+        # executions, not the counts, back to that time, so a caller polling
+        # with some overlap can catch late writes without counting them
+        # twice. Built on #list_executions and #count_executions.
+        def finished_executions(from:, to:, listed_from: nil, saga_name: nil, per_saga: nil, limit: 100)
+          counts = count_executions(group_by: %i[saga_name status], saga_name: saga_name, finished_from: from, finished_to: to)
+          window = {saga_name: saga_name, finished_from: [listed_from, from].compact.min, finished_to: to}
+          names = (per_saga && listed_from.nil?) ? counts.keys.map(&:first).uniq : nil
           executions = if per_saga
-            counts.keys.map(&:first).uniq.sort.flat_map do |name|
+            (names || saga_names_finished(**window)).sort.flat_map do |name|
               list_executions(**window, saga_name: name, sort: :finished_at, limit: [per_saga, limit].min)
             end
           else
@@ -268,13 +282,19 @@ module Lepus
         end
 
         # The column and direction of a #list_executions order, and whether
-        # the column may hold nulls.
-        def list_order(sort, direction)
+        # rows without a value can match: never for finished_at when a
+        # finished_at bound is among the filters.
+        def list_order(sort, direction, filters = {})
           column = SORTS[sort.to_s.to_sym] || raise(ArgumentError, "Cannot sort executions by #{sort.inspect}")
           descending = direction.to_s.to_sym
           raise ArgumentError, "Unknown sort direction #{direction.inspect}" unless DIRECTIONS.include?(descending)
 
-          [column, descending == :desc, NULLABLE_SORTS.include?(column)]
+          bounded = column == :finished_at && (filters[:finished_from] || filters[:finished_to])
+          [column, descending == :desc, NULLABLE_SORTS.include?(column) && !bounded]
+        end
+
+        def saga_names_finished(**window)
+          count_executions(group_by: :saga_name, **window).keys
         end
 
         def filter_values(value)

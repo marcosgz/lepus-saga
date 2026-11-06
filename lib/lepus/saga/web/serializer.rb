@@ -27,10 +27,9 @@ module Lepus
         # A finished execution and the steps it passed: `reached` is the
         # furthest step it ran forward and, on the compensation path,
         # `back_to` the last step it compensated (or failed compensating).
-        def finished(record, attempts)
+        def finished(record, executed)
           steps = Array(Lepus::Saga.definitions[record.saga_name]&.steps).map(&:name)
-          forward = attempts.select { |attempt| attempt.direction == "execute" }.map(&:step_name)
-          reached = forward.max_by { |name| steps.index(name) || -1 } || record.current_step
+          reached = executed.max_by { |name| steps.index(name) || -1 } || record.current_step
           {
             id: record.id, saga_name: record.saga_name, status: record.status,
             started_at: time(record.started_at), finished_at: time(record.finished_at), duration_ms: record.duration_ms,

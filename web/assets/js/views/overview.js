@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { h, s, clear, refill, reducedMotion } from "../dom.js";
-import { every, pollMs } from "../live.js";
+import { every, isLive, onLive, pollMs } from "../live.js";
 import { LineMap } from "../map.js";
 import { rememberSagas } from "../sagas.js";
 import { ago, compact, count, dayMonth, duration, hourMinute, plural, toTime, waited } from "../format.js";
@@ -164,6 +164,14 @@ export function overview(root, { me, params }) {
   let destroyed = false;
   // Server time of the last poll: the next one asks what finished since.
   let serverNow = null;
+  // The interval in force at the last poll, and whether polling was paused
+  // or the tab hidden since: a longer gap than that is a resume.
+  let lastInterval = pollMs();
+  let paused = !isLive();
+  let away = document.hidden;
+  const offLive = onLive(() => { if (!isLive()) paused = true; });
+  const markAway = () => { if (document.hidden) away = true; };
+  document.addEventListener("visibilitychange", markAway);
   const handled = new Map();
   const probe = { continued: 0, replayed: 0, collapsed: 0 };
 
@@ -252,26 +260,32 @@ export function overview(root, { me, params }) {
   // the order they started, at most REPLAY_PER_LINE a line. After a pause
   // only the last poll interval is animated; the rest of each line is a
   // count at its end, and with reduced motion every line just sums up how
-  // its executions ended.
-  function finishLines(recent, since) {
+  // its executions ended. Counts cover what finished since `since`; the
+  // executions listed from the overlap before it are drawn, not counted.
+  function finishLines(recent, since, gapLimit) {
     const now = toTime(recent.now);
     const interval = pollMs();
-    const resumed = now - since > interval * 2;
+    const resumed = now - since > gapLimit;
     const cut = resumed ? now - interval : -Infinity;
     const reduce = reducedMotion.matches;
+    const counted = (execution) => toTime(execution.finished_at) >= since;
     const replays = [];
     const notes = [];
+    const pending = [];
     for (const line of recent.lines) {
       const def = lineFor(line.saga_name);
       if (!def || !def.steps.length) continue;
       const counts = { ...line.counts };
       let total = line.total;
       let continued = 0;
+      let shown = 0;
       const fresh = [];
       for (const execution of line.executions) {
         if (handled.has(execution.id)) {
-          counts[execution.status] = Math.max(0, (counts[execution.status] || 0) - 1);
-          total--;
+          if (counted(execution)) {
+            counts[execution.status] = Math.max(0, (counts[execution.status] || 0) - 1);
+            total--;
+          }
           continue;
         }
         remember(execution.id);
@@ -279,6 +293,7 @@ export function overview(root, { me, params }) {
         if (token && !token.exit) {
           finishToken(token, execution);
           continued++;
+          if (counted(execution)) shown++;
         } else {
           fresh.push(execution);
         }
@@ -299,13 +314,21 @@ export function overview(root, { me, params }) {
         replays.push({ ...spec, id: execution.id, line: line.saga_name, duration: REPLAY_MS, delay: (index / Math.max(1, animated.length)) * spread });
       });
       tally("replayed", animated.length);
-      const left = Math.max(0, total - continued - animated.length);
-      if (left) {
-        if (resumed) tally("collapsed", left);
-        notes.push({ line: line.saga_name, parts: [{ text: `+${count(left)} ${resumed ? "finished while paused" : "just finished"}`, tone: "pale" }] });
-      }
+      shown += animated.filter(({ execution }) => counted(execution)).length;
+      pending.push({ line: line.saga_name, left: Math.max(0, total - shown) });
     }
-    return { replays, notes };
+    const words = !resumed ? "just finished" : paused ? "finished while paused" : away ? "finished while away" : "finished earlier";
+    return { replays, notes, pending, resumed, words };
+  }
+
+  // The "+N" pill of each line, less the tokens that settle() runs out.
+  function finishNotes(finished, settledByLine) {
+    for (const { line, left: unsettled } of finished.pending) {
+      const left = Math.max(0, unsettled - (settledByLine.get(line) || 0));
+      if (!left) continue;
+      if (finished.resumed) tally("collapsed", left);
+      finished.notes.push({ line, parts: [{ text: `+${count(left)} ${finished.words}`, tone: "pale" }] });
+    }
   }
 
   async function settle(id) {
@@ -487,7 +510,7 @@ export function overview(root, { me, params }) {
       api.sagas({ from: rangeFrom(asked) }),
       api.stalled({ limit: WAITING_SHOWN }),
       api.moving({ per_station: PER_STATION, stations: STATIONS_FETCHED }),
-      since === null ? null : api.recent({ since: new Date(since - OVERLAP_MS).toISOString(), per_saga: REPLAY_PER_LINE }).catch(() => null)
+      since === null ? null : api.recent({ since: new Date(since).toISOString(), replay_from: new Date(since - OVERLAP_MS).toISOString(), per_saga: REPLAY_PER_LINE }).catch(() => null)
     ]);
     if (destroyed || asked !== range) return;
     serverNow = toTime(recentData ? recentData.now : movingData.now) || serverNow;
@@ -543,11 +566,16 @@ export function overview(root, { me, params }) {
       return `${saga}|${stepIndex(saga, step)}`;
     }));
 
-    const finished = recentData ? finishLines(recentData, since) : { replays: [], notes: [] };
+    const gapLimit = lastInterval * 2;
+    lastInterval = pollMs();
+    const finished = recentData ? finishLines(recentData, since, gapLimit) : { replays: [], notes: [], pending: [] };
+    paused = !isLive();
+    away = document.hidden;
 
     // Tokens that left a fully listed station are looked up to show how they
     // ended; at a partial one they just drop out.
     let settling = 0;
+    const settledByLine = new Map();
     for (const [id, token] of tokens) {
       if (seen.has(id) || token.exit || token.settling) continue;
       if (partial.has(`${token.saga}|${token.step}`) || settling >= SETTLE_PER_POLL) {
@@ -556,8 +584,10 @@ export function overview(root, { me, params }) {
       }
       token.settling = true;
       settling++;
+      settledByLine.set(token.saga, (settledByLine.get(token.saga) || 0) + 1);
       settle(id);
     }
+    finishNotes(finished, settledByLine);
     sync();
     map.replay(finished.replays);
     if (finished.notes.length) map.setFinished(finished.notes, Math.max(NOTE_MIN_MS, pollMs()));
@@ -589,6 +619,8 @@ export function overview(root, { me, params }) {
     destroy() {
       destroyed = true;
       stops.forEach((stop) => stop());
+      offLive();
+      document.removeEventListener("visibilitychange", markAway);
       reducedMotion.removeEventListener("change", describeKey);
       map.destroy();
       throughput.destroy();

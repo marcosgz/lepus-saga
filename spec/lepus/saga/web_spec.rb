@@ -279,6 +279,19 @@ RSpec.describe Lepus::Saga::Web do
       expect(sole(json["lines"])["executions"].size).to eq(2)
     end
 
+    it "lists, without counting, the ones that finished from replay_from" do
+      since = ago(minutes(1))
+      early = finish(create_execution, "completed", at: since - 1)
+      late = finish(create_execution, "completed", at: ago(10))
+      finish(create_execution, "completed", at: since - 5)
+
+      get "/api/recent", since: since.iso8601(3), replay_from: (since - 2).iso8601(3)
+
+      line = sole(json["lines"])
+      expect(line).to include("total" => 1, "counts" => {"completed" => 1})
+      expect(line["executions"].map { |row| row["id"] }).to eq([late.id, early.id])
+    end
+
     it "needs a since before now" do
       get "/api/recent"
       expect(last_response.status).to eq(400)

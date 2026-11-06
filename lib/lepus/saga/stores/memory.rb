@@ -178,7 +178,7 @@ module Lepus
         def queries? = true
 
         def list_executions(sort: :started_at, direction: :desc, after: nil, limit: 50, **filters)
-          column, descending, = list_order(sort, direction)
+          column, descending, = list_order(sort, direction, filters)
           cursor = after && find_execution(after)
           return [] if after && !cursor
 
