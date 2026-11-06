@@ -25,6 +25,7 @@ module Lepus
           ["GET", %r{\A/executions\z}, :executions],
           ["GET", %r{\A/executions/(?<id>[^/]+)\z}, :execution],
           ["GET", %r{\A/moving\z}, :moving],
+          ["GET", %r{\A/recent\z}, :recent],
           ["GET", %r{\A/series\z}, :series],
           ["GET", %r{\A/insights/failures\z}, :failures],
           ["GET", %r{\A/insights/latency\z}, :latency],
@@ -40,6 +41,8 @@ module Lepus
         IN_PROGRESS = ExecutionBehaviour::IN_PROGRESS_STATUSES
         STOPPED_STATUSES = %w[failed compensation_failed].freeze
         RELATED_LIMIT = 20
+        SORTS = {"started_at" => :started_at, "duration" => :duration}.freeze
+        DIRECTIONS = %w[desc asc].freeze
 
         def initialize(config)
           @config = config
@@ -104,7 +107,7 @@ module Lepus
               totals: totals.filter_map { |(saga, status), count| [status, count] if saga == name }.to_h
             )
           end
-          {from: Serializer.time(from), to: Serializer.time(to), stalled_after: config.stalled_after, sagas: sagas}
+          {now: Serializer.time(Time.now.utc), from: Serializer.time(from), to: Serializer.time(to), stalled_after: config.stalled_after, sagas: sagas}
         end
 
         def stations(name, counts, stalled, failures)
@@ -121,12 +124,18 @@ module Lepus
           stations
         end
 
+        # A page of executions in the order of `sort` (started_at or
+        # duration) and `dir`; `next` is the `after` of the following page.
         def executions(request)
           limit = integer(request, "limit", default: 50, range: 1..200)
-          rows = store.list_executions(**filters(request), before_id: param(request, "before"), limit: limit + 1)
+          sort = choice(request, "sort", SORTS.keys, default: "started_at")
+          direction = choice(request, "dir", DIRECTIONS, default: "desc")
+          rows = store.list_executions(**filters(request), sort: SORTS[sort], direction: direction.to_sym,
+            after: param(request, "after"), limit: limit + 1)
           {
+            sort: sort, dir: direction,
             executions: rows.first(limit).map { |execution| Serializer.execution(execution) },
-            next_before: (rows[limit - 1].id if rows.size > limit)
+            next: (rows[limit - 1].id if rows.size > limit)
           }
         end
 
@@ -143,7 +152,40 @@ module Lepus
             rows = store.list_executions(saga_name: saga, current_step: step, status: IN_PROGRESS, progress_from: since, limit: per_station)
             {saga_name: saga, step_name: step, count: count, executions: rows.map { |execution| Serializer.execution(execution) }}
           end
-          {stalled_after: config.stalled_after, stations: stations, omitted: counts.size - busiest.size}
+          {now: Serializer.time(Time.now.utc), stalled_after: config.stalled_after, stations: stations, omitted: counts.size - busiest.size}
+        end
+
+        # Executions that finished since `since` (the `now` of an earlier
+        # response), per saga line: the latest `per_saga` of them with the
+        # steps they passed, and counts by status of every one, so a live
+        # view can finish or replay them without losing any. `replay_from`
+        # (before `since`) also lists, without counting, the ones that
+        # finished from then on, for writes that landed after the last poll.
+        def recent(request)
+          since = time(request, "since") || raise(ArgumentError, "since must be an ISO 8601 time")
+          now = Time.now.utc
+          raise ArgumentError, "since must be before now" unless since < now
+
+          replay_from = time(request, "replay_from")
+          replay_from = nil if replay_from && replay_from >= since
+          per_saga = integer(request, "per_saga", default: 8, range: 1..50)
+          limit = integer(request, "limit", default: 100, range: 1..500)
+          result = store.finished_executions(
+            from: since, to: now, listed_from: replay_from, saga_name: list(request, "saga"), per_saga: per_saga, limit: limit
+          )
+          steps = store.executed_steps(result[:executions].reject { |execution| execution.status == "completed" })
+          by_saga = result[:executions].group_by(&:saga_name)
+          counts = result[:counts].group_by { |(saga, _status), _count| saga }
+          lines = (by_saga.keys | counts.keys).sort.map do |saga|
+            line_counts = counts.fetch(saga, [])
+            {
+              saga_name: saga,
+              total: line_counts.sum(&:last),
+              counts: line_counts.to_h { |(_saga, status), count| [status, count] },
+              executions: by_saga.fetch(saga, []).map { |execution| Serializer.finished(execution, steps.fetch(execution.id, [])) }
+            }
+          end
+          {now: Serializer.time(now), since: Serializer.time(since), lines: lines}
         end
 
         def execution(_request, id:)
@@ -286,6 +328,13 @@ module Lepus
         def param(request, name)
           value = request.GET[name]
           presence(value.strip) if value.is_a?(String)
+        end
+
+        def choice(request, name, values, default:)
+          value = param(request, name) || default
+          raise ArgumentError, "#{name} must be one of #{values.join(", ")}" unless values.include?(value)
+
+          value
         end
 
         def flag?(request, name)

@@ -131,7 +131,7 @@ module Lepus
 
         def executions_for_resource(resource_type, resource_id)
           where(@executions, Execution) { |row| row[:resource_type] == resource_type && row[:resource_id] == resource_id }
-            .sort_by { |execution| [execution.created_at, execution.id] }.reverse
+            .sort_by { |execution| [execution.started_at, execution.id] }.reverse
         end
 
         def create_step_attempt(execution, attributes)
@@ -177,10 +177,15 @@ module Lepus
 
         def queries? = true
 
-        def list_executions(before_id: nil, limit: 50, **filters)
+        def list_executions(sort: :started_at, direction: :desc, after: nil, limit: 50, **filters)
+          column, descending, = list_order(sort, direction, filters)
+          cursor = after && find_execution(after)
+          return [] if after && !cursor
+
+          compare = list_comparator(column, descending)
           executions = matching_executions(**filters)
-          executions = executions.select { |execution| execution.id < before_id } if before_id
-          executions.sort_by(&:id).reverse.first(limit)
+          executions = executions.select { |execution| compare.call(execution, cursor).positive? } if cursor
+          executions.sort(&compare).first(limit)
         end
 
         def count_executions(group_by:, **filters)
@@ -192,7 +197,7 @@ module Lepus
           window = from...to
           executions = matching_executions(saga_name: saga_name)
           started, started_truncated = take_rows(
-            executions.map(&:created_at).select { |time| window.cover?(time) }.sort.reverse, max_rows
+            executions.map(&:started_at).select { |time| window.cover?(time) }.sort.reverse, max_rows
           )
           finished, finished_truncated = take_rows(
             executions.select { |execution| execution.terminal? && window.cover?(execution.finished_at) }
@@ -229,7 +234,8 @@ module Lepus
         private
 
         def matching_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil)
+          progress_from: nil, progress_to: nil, finished_from: nil, finished_to: nil, error_class: nil, error_step: nil, error_from: nil,
+          error_to: nil)
           sagas = filter_values(saga_name)
           statuses = filter_values(status)
           steps = filter_values(current_step)
@@ -241,14 +247,33 @@ module Lepus
             (sagas.nil? || sagas.include?(row[:saga_name])) &&
               (statuses.nil? || statuses.include?(row[:status])) &&
               (steps.nil? || steps.include?(row[:current_step])) &&
-              (from.nil? || row[:created_at] >= from) &&
-              (to.nil? || row[:created_at] < to) &&
-              (progress_from.nil? || row[:last_progress_at] >= progress_from) &&
-              (progress_to.nil? || row[:last_progress_at] < progress_to) &&
+              within?(row[:started_at], from, to) &&
+              within?(row[:last_progress_at], progress_from, progress_to) &&
+              within?(row[:finished_at], finished_from, finished_to) &&
               (failing.nil? || failing.include?(row[:id])) &&
               (partition_sagas.nil? || in_partition?(row, partition.to_s, partition_sagas)) &&
               (needle.nil? || row.values_at(:resource_type, :resource_id).any? { |value| value.to_s.downcase.include?(needle) })
           end
+        end
+
+        # Orders by the column in the given direction with nulls last either
+        # way, then by id in the same direction.
+        def list_comparator(column, descending)
+          lambda do |left, right|
+            a = left[column]
+            b = right[column]
+            next(a.nil? ? 1 : -1) if a.nil? != b.nil?
+
+            order = (a.nil? ? 0 : a <=> b).nonzero? || left.id <=> right.id
+            descending ? -order : order
+          end
+        end
+
+        def within?(value, from, to)
+          return true if from.nil? && to.nil?
+          return false if value.nil?
+
+          (from.nil? || value >= from) && (to.nil? || value < to)
         end
 
         def failing_execution_ids(error_classes, steps, from, to)

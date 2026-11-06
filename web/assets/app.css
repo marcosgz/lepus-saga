@@ -300,6 +300,21 @@ button, input, select { font: inherit; color: inherit; }
 .sym-idle { fill: var(--paper); stroke: var(--token); stroke-width: 3; }
 .sym-stop { fill: var(--stop); }
 .sym-back { fill: var(--back); }
+.sym-replay { fill: var(--token); fill-opacity: 0.5; stroke: var(--line); stroke-width: 2; stroke-opacity: 0.45; }
+
+.m-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  list-style: none;
+  margin: -6px 0 18px;
+  padding: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  font-weight: 550;
+}
+.m-key li { display: inline-flex; align-items: center; gap: 6px; }
+.m-key .sym svg { display: block; width: 14px; height: 14px; overflow: visible; }
 
 /* The map */
 
@@ -366,6 +381,14 @@ button, input, select { font: inherit; color: inherit; }
 .t-more.is-back { stroke: var(--back); }
 .t-more-n { fill: var(--token-text); font-size: 11.5px; font-weight: 750; }
 .t-more-n.is-back { fill: var(--back-text); }
+.t-token.is-replay { fill-opacity: 0.5; stroke-opacity: 0.6; }
+.t-flash { fill: var(--stop); }
+.t-note { fill: var(--raise); stroke: var(--rule); stroke-width: 1.5; }
+.t-note-n { font-size: 11.5px; font-weight: 750; }
+.t-note-pale, .t-note-sep { fill: var(--ink-2); }
+.t-note-done { fill: var(--ink-2); }
+.t-note-back { fill: var(--back-text); }
+.t-note-stop { fill: var(--stop-text); }
 .g-trail-move { stop-color: var(--token); }
 .g-trail-back { stop-color: var(--back); }
 
@@ -801,7 +824,25 @@ button, input, select { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--rule);
 }
 .rows td { padding: 12px 12px 12px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: middle; }
-.rows tr { cursor: pointer; }
+.rows tbody tr { cursor: pointer; }
+.rows th .sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.rows th .sort:hover { color: var(--ink); background: var(--rule-soft); }
+.rows th .sort svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; opacity: 0.45; }
+.rows th[aria-sort="ascending"] .sort, .rows th[aria-sort="descending"] .sort { color: var(--ink); }
+.rows th[aria-sort="ascending"] .sort svg, .rows th[aria-sort="descending"] .sort svg { opacity: 1; }
+.sort-pick { display: none; }
 .rows tbody tr:hover td { background: var(--rule-soft); }
 .rows td:first-child, .rows th:first-child { padding-left: 4px; }
 .rows .r-res a { font-weight: 650; text-decoration: none; overflow-wrap: anywhere; }
@@ -875,6 +916,7 @@ button, input, select { font: inherit; color: inherit; }
   .h-took { grid-column: 3; padding-left: 6px; padding-top: 0; }
   .h-error, .h-trace { grid-column: 3; }
   .rows thead { display: none; }
+  .sort-pick { display: inline-block; }
   .rows, .rows tbody, .rows tr, .rows td { display: block; }
   .rows tr {
     display: grid;
@@ -890,6 +932,8 @@ button, input, select { font: inherit; color: inherit; }
   .rows .r-step { grid-column: 1; font-size: 14px; }
   .rows .r-when { grid-column: 2; text-align: right; }
   .rows .r-took { display: none; }
+  .rows.is-by-took .r-when { display: none; }
+  .rows.is-by-took .r-took { display: block; grid-column: 2; text-align: right; }
 }
 
 @media (min-width: 1700px) {

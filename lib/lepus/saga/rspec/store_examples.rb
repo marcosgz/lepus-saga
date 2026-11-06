@@ -55,7 +55,7 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
 
       expect(execution).to have_attributes(
         status: "running", direction: "execute", epoch: 0, resume_count: 0,
-        failure_reason: nil, finished_at: nil
+        failure_reason: nil, finished_at: nil, duration_ms: nil
       )
       expect(execution.created_at).to be_within(1).of(Time.now.utc)
       expect(execution.updated_at).to be_within(1).of(Time.now.utc)
@@ -117,11 +117,12 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
       execution.failure_reason = "boom " * 100
       execution.context = {"after" => true}
       execution.finished_at = Time.now.utc
+      execution.duration_ms = 86_400_000 * 400
 
       expect(store.save_execution(execution)).to eq(execution)
       expect(store.find_execution(execution.id)).to have_attributes(
         status: "compensating", direction: "compensate", current_step: "second", epoch: 2,
-        failure_reason: "boom " * 100, context: {"after" => true}
+        failure_reason: "boom " * 100, context: {"after" => true}, duration_ms: 86_400_000 * 400
       )
     end
 
@@ -367,14 +368,14 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
   end
 
   describe "#executions_for_resource" do
-    it "returns the resource's executions, newest first" do
-      older = create_execution(resource_id: "r-1")
-      sleep 0.01
-      newer = create_execution(resource_id: "r-1")
+    it "returns the resource's executions, latest start first, whatever the ids" do
+      latest = create_execution(resource_id: "r-1", started_at: ago(minutes(1)))
+      earliest = create_execution(resource_id: "r-1", started_at: ago(hours(2)))
+      middle = create_execution(resource_id: "r-1", started_at: ago(hours(1)))
       create_execution(resource_id: "r-2")
       create_execution(resource_type: "Other", resource_id: "r-1")
 
-      expect(store.executions_for_resource("Resource", "r-1").map(&:id)).to eq([newer.id, older.id])
+      expect(store.executions_for_resource("Resource", "r-1").map(&:id)).to eq([latest.id, middle.id, earliest.id])
     end
   end
 

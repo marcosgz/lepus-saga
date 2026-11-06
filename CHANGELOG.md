@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 - Unreleased
+* Fixed: executions list in time order when their ids are not time-ordered (e.g. random UUIDv4): `list_executions` sorts by started_at and pages by `after` (the last row's id) instead of by id, `executions_for_resource` orders by started_at, and the stalled list and failure samples break ties by id only after time
+* Added: `duration_ms` on executions (`ExecutionBehaviour::ATTRIBUTES`), written by the engine when an execution ends (completed, compensated, failed, compensation_failed, abandoned) and cleared when a retry reopens it; `finish_attributes` and `reopen_attributes` on `ExecutionBehaviour`
+* Added: `list_executions(sort:, direction:)`: `:started_at` (default), `:duration` or `:finished_at`, `:desc` (default) or `:asc`, ties by id, executions without a value last in either direction; an unknown `after` returns an empty page. The console's Started and Took headers sort the executions list (buttons with `aria-sort`, a select on phones, kept in the URL)
+* Changed: the executions list pages along the active sort ("Show older" follows it, `/api/executions` takes `sort`, `dir`, `after` and `limit` and returns `next`), changing the sort starts the list over and each refresh reloads the rows shown in that order. `before_id` and `next_before` are gone
+* Changed: the `from`/`to` filters and the series' starts use started_at instead of created_at
+* Added: `finished_executions(from:, to:, listed_from:, saga_name:, per_saga:, limit:)`, `executed_steps(executions)` and the `finished_from`/`finished_to` filters in the query contract, `GET /api/recent?since=&replay_from=` and the server's `now` on `/api/sagas` and `/api/moving`
+* Added: the map replays executions that finished between refreshes: tokens seen moving run on to how they ended, executions that started and finished in between replay their path in a lighter shade (at most 8 a line, a "+N just finished" pill for the rest), a pause collapses into "+N finished while paused", reduced motion shows per-line summaries, and the map key gains "Just finished"
+* Added: `bin/web-demo` starts quick webhook deliveries (more with `HEAVY=1`) that finish between refreshes
+
 ## 0.3.0 - Unreleased
 * Added: brand mark and README logo
 * Added: saga engine: `Lepus::Saga::Definition`, `Executor`, `ExecutorConsumer`, `StepProducer`, `QueueDepth`, `Instrumentation`, `LogSubscriber` and `Testing.drain`

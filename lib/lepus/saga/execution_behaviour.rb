@@ -8,7 +8,7 @@ module Lepus
       ATTRIBUTES = %i[
         id saga_name resource_type resource_id status current_step direction
         epoch context correlation_id failure_reason partition started_at
-        finished_at last_progress_at resume_count created_at updated_at
+        finished_at duration_ms last_progress_at resume_count created_at updated_at
       ].freeze
 
       STATUSES = %w[running completed compensating compensated failed compensation_failed].freeze
@@ -53,6 +53,15 @@ module Lepus
       def duration
         (finished_at || Time.now.utc) - started_at
       end
+
+      # The attributes that end this execution at `now`: finished_at and the
+      # whole run's duration_ms, which the console sorts by.
+      def finish_attributes(now = Time.now.utc)
+        {finished_at: now, duration_ms: ((now - started_at) * 1000).round}
+      end
+
+      # The attributes that reopen a finished execution.
+      def reopen_attributes = {finished_at: nil, duration_ms: nil}
     end
   end
 end

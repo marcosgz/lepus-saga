@@ -95,7 +95,7 @@ module Lepus
             epoch: execution.epoch + 1,
             status: execution.compensate_direction? ? "compensating" : "running",
             failure_reason: nil,
-            finished_at: nil)
+            **execution.reopen_attributes)
         end
         Instrumentation.saga_event("saga.resumed", execution)
         StepProducer.publish_step(execution)

@@ -7,6 +7,9 @@
 #   bin/web-demo                  # http://127.0.0.1:9292
 #   PORT=3030 DAYS=3 bin/web-demo
 #   HEAVY=1 bin/web-demo          # plus thousands of failures, a crowded step and hundreds of stalled executions
+#
+# Webhook deliveries are quick: most start and finish between two refreshes,
+# so the map replays them.
 
 require "bundler/setup"
 require "logger"
@@ -179,13 +182,24 @@ module WebDemo
     demo_step :expire_link, takes: 0.01..0.05, flaky: 0.0
   end
 
+  class WebhookDeliver < Saga
+    saga_name "webhooks.deliver"
+    partition "webhooks"
+
+    demo_step :reserve_slot, compensate: :release_slot, takes: 0.01..0.05, flaky: 0.0, rejects: ->(_context) { "endpoint disabled" }
+    demo_step :post_payload, takes: 0.05..0.4, flaky: 0.1, outage: 0.0, errors: [[GatewayTimeout, "endpoint timed out after 2s"]], retry: {attempts: 1}
+    demo_step :record_delivery, takes: 0.01..0.05, flaky: 0.01, retry: {attempts: 1}
+  end
+
   SAGAS = [
     [Checkout, 0.36, "Order", -> { "ord_#{rand(10_000..99_999)}" }],
     [InvoiceIssue, 0.22, "Invoice", -> { "inv-2026-#{format("%05d", rand(1..30_000))}" }],
     [SubscriptionRenew, 0.2, "Subscription", -> { "sub_#{SecureRandom.hex(4)}" }],
     [AccountProvision, 0.12, "Account", -> { "acct_#{SecureRandom.hex(3)}" }],
-    [ReportExport, 0.1, "Export", -> { "exp_#{rand(1000..9999)}" }]
+    [ReportExport, 0.1, "Export", -> { "exp_#{rand(1000..9999)}" }],
+    [WebhookDeliver, 0.15, "Webhook", -> { "whk_#{SecureRandom.hex(4)}" }]
   ].freeze
+  FAST = WebhookDeliver.saga_name
 
   # A time-ordered queue of things to do: start a saga, deliver a step
   # message, or an operator retrying or compensating an execution.
@@ -208,8 +222,8 @@ module WebDemo
       @mutex.synchronize { @events.shift if @events.first && @events.first.first <= now }
     end
 
-    def start_saga(now)
-      saga, _weight, type, id = SAGAS.max_by { |_, weight| rand**(1.0 / weight) }
+    def start_saga(now, saga = nil)
+      saga, _weight, type, id = saga ? SAGAS.find { |candidate, *| candidate == saga } : SAGAS.max_by { |_, weight| rand**(1.0 / weight) }
       resource = {type: type, id: id.call}
       context = {"requested_by" => %w[api checkout-web billing-cron admin].sample, "card" => "•••• #{rand(1000..9999)}"}
       execution = saga.start(resource: resource, context: context, correlation_id: (rand < 0.6) ? "req_#{SecureRandom.hex(6)}" : nil)
@@ -248,12 +262,16 @@ module WebDemo
         if rand < LOST_MESSAGE
           schedule(now + rand(1800..14_400), [:compensate, payload[:execution_id]]) if rand < 0.4
         else
-          schedule(now + delivery_delay, [:deliver, payload])
+          schedule(now + delivery_delay(payload[:saga]), [:deliver, payload])
         end
       end
     end
 
-    def delivery_delay = Clock.virtual? ? rand(0.2..20.0) : rand(0.5..5.0)
+    def delivery_delay(saga)
+      return rand(0.02..0.3) if saga == FAST
+
+      Clock.virtual? ? rand(0.2..20.0) : rand(0.5..5.0)
+    end
 
     def retry_delay = Clock.virtual? ? rand(10.0..120.0) : rand(4.0..12.0)
   end
@@ -333,7 +351,7 @@ module WebDemo
     def failed_charge(at)
       errors = [charge_error, charge_error]
       record = execution("subscriptions.renew", "charge_card", ["Subscription", "sub_#{SecureRandom.hex(4)}"], at: at,
-        progress_at: at + 1, status: "failed", finished_at: at + 25, failure_reason: "charge_card: #{errors.last.last}")
+        progress_at: at + 1, status: "failed", finished_at: at + 25, duration_ms: 25_000, failure_reason: "charge_card: #{errors.last.last}")
       attempt(record, "load_plan", 1, at: at, status: "succeeded", seconds: 0.1)
       attempt(record, "charge_card", 1, at: at + 1, status: "failed", seconds: 10, error: errors.first)
       attempt(record, "charge_card", 2, at: at + 14, status: "failed", seconds: 10, error: errors.last)
@@ -368,7 +386,7 @@ module WebDemo
             next id unless record&.running?
             next id unless now - record.last_progress_at > RENDER_SECONDS || rand < 0.03
 
-            store.update_execution(record, status: "completed", current_step: "deliver_email", finished_at: now, last_progress_at: now)
+            store.update_execution(record, status: "completed", current_step: "deliver_email", last_progress_at: now, **record.finish_attributes(now))
             render(now)
           end
         rescue => error
@@ -402,7 +420,7 @@ module WebDemo
       Clock.now = nil
     end
 
-    def run_live(simulation, workers: 4)
+    def run_live(simulation, workers: 4, fast_rate: 0.06)
       queue = Thread::Queue.new
       workers.times do
         Thread.new do
@@ -418,6 +436,7 @@ module WebDemo
         loop do
           now = Time.now
           simulation.start_saga(now) if rand < 0.006
+          simulation.start_saga(now, WebhookDeliver) if rand < fast_rate
           simulation.collect_messages(now)
           while (entry = simulation.next_due(now))
             queue << entry.last
@@ -440,7 +459,7 @@ WebDemo.seed(simulation, days: days)
 WebDemo::HeavyLoad.seed if ENV["HEAVY"] == "1"
 count = Lepus::Saga.store.list_executions(limit: 1_000_000).size
 puts format("Seeded %d executions over %d days in %.1fs", count, days, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
-WebDemo.run_live(simulation)
+WebDemo.run_live(simulation, fast_rate: (ENV["HEAVY"] == "1") ? 0.12 : 0.06)
 
 Lepus::Saga::Web.configure do |config|
   config.title = "Sagas demo"
