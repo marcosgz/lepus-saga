@@ -14,6 +14,7 @@ This gem is the engine and has no ORM dependency. Storage comes from an adapter:
 | Store | Gem | `config.store =` |
 | --- | --- | --- |
 | ActiveRecord (PostgreSQL, MySQL/MariaDB, SQLite) | [lepus-saga-active_record](https://github.com/marcosgz/lepus-saga-active_record) | `:active_record` |
+| Sequel (PostgreSQL, MySQL/MariaDB, SQLite) | [lepus-saga-sequel](https://github.com/marcosgz/lepus-saga-sequel) | `:sequel` |
 | In-process memory (tests, scripts) | this gem | `:memory` |
 
 ## Installation
@@ -30,6 +31,8 @@ bundle install
 bin/rails generate lepus:saga:install
 bin/rails db:migrate
 ```
+
+With Sequel, add `gem "lepus-saga-sequel"` instead, create the tables with `Lepus::Saga::Sequel.migrate(DB)` and set `config.store = :sequel` (see the [lepus-saga-sequel README](https://github.com/marcosgz/lepus-saga-sequel#readme)).
 
 ## Configuration
 
@@ -152,7 +155,7 @@ Adapters usually offer richer queries on their own records (`Lepus::Saga::Active
 - **Executions**: a paged list filtered by status, saga, step, error, time range or stalled.
 - **Execution**: a replay of the execution along its line, its attempt history with errors and backtraces, its context and other runs of the same resource. Retry and compensate are one click plus a confirmation.
 
-It reads through the store's optional query methods, so the store must report `queries?` (`Stores::Memory` and `Stores::ActiveRecord` do).
+It reads through the store's optional query methods, so the store must report `queries?` (`Stores::Memory`, `Stores::ActiveRecord` and `Stores::Sequel` do).
 
 ```ruby
 require "lepus/saga/web"
@@ -294,15 +297,15 @@ The engine changes an execution only inside `with_lock`/`with_locked_execution`.
 ### Writing an adapter
 
 1. Create a gem named `lepus-saga-<name>` with `lib/lepus/saga/stores/<name>.rb` defining `Lepus::Saga::Stores::<Name> < Lepus::Saga::Stores::Base`, so `config.store = :<name>` finds it.
-2. Give it record classes that include `Lepus::Saga::ExecutionBehaviour` and `Lepus::Saga::StepAttemptBehaviour`. They need readers and writers for each behaviour's `ATTRIBUTES`, and `[](name)` returning the raw stored value. The behaviour's `partition` (the column, or the definition's partition when it is nil) must win over the column reader. ActiveRecord defines column readers in a generated module, so including the behaviour in the class body is enough; check that your ORM does the same.
+2. Give it record classes that include `Lepus::Saga::ExecutionBehaviour` and `Lepus::Saga::StepAttemptBehaviour`. They need readers and writers for each behaviour's `ATTRIBUTES`, and `[](name)` returning the raw stored value. The behaviour's `partition` (the column, or the definition's partition when it is nil) must win over the column reader. ActiveRecord and Sequel define column readers in a module below the class, so including the behaviour in the class body is enough; check that your ORM does the same.
 3. Implement every method of `Stores::Base` that raises `NotImplementedError`.
 4. Run the shared examples:
 
 ```ruby
-# spec/lepus/saga/stores/sequel_spec.rb
+# spec/lepus/saga/stores/my_store_spec.rb
 require "lepus/saga/rspec"
 
-RSpec.describe Lepus::Saga::Stores::Sequel do
+RSpec.describe Lepus::Saga::Stores::MyStore do
   let(:store) { described_class.new }
 
   after { DB[:saga_step_attempts].delete && DB[:saga_executions].delete }
@@ -316,65 +319,7 @@ Both accept `concurrency: false` to skip the threaded examples on a backend that
 
 5. Optionally implement the query methods, return true from `queries?` and add `it_behaves_like "a lepus saga query store"`. An adapter without them keeps working with the engine; tools that need them check `queries?` first.
 
-A Sequel store would start like this (a sketch, not a shipped gem):
-
-```ruby
-require "lepus/saga"
-require "sequel"
-
-module Lepus
-  module Saga
-    module Sequel
-      class Execution < ::Sequel::Model(:saga_executions)
-        plugin :serialization, :json, :context
-        include Lepus::Saga::ExecutionBehaviour
-      end
-
-      class StepAttempt < ::Sequel::Model(:saga_step_attempts)
-        plugin :serialization, :json, :context_after
-        include Lepus::Saga::StepAttemptBehaviour
-      end
-    end
-
-    module Stores
-      class Sequel < Base
-        def create_execution(attributes)
-          Saga::Sequel::Execution.create({id: SecureRandom.uuid_v7, context: {}}.merge(attributes))
-        end
-
-        def find_execution(id) = Saga::Sequel::Execution[id]
-
-        def save_execution(execution)
-          execution.save_changes
-          execution
-        end
-
-        def with_lock(execution)
-          execution.db.transaction do
-            execution.lock!
-            yield execution
-          end
-        end
-
-        def increment_resume_count(execution)
-          dataset = Saga::Sequel::Execution.where(id: execution.id)
-          dataset.update(resume_count: ::Sequel[:resume_count] + 1, updated_at: Time.now)
-          execution.values[:resume_count] = dataset.get(:resume_count)
-        end
-
-        def create_step_attempt(execution, attributes)
-          Saga::Sequel::StepAttempt.create({id: SecureRandom.uuid_v7, saga_execution_id: execution.id}.merge(attributes))
-        rescue ::Sequel::UniqueConstraintViolation => error
-          raise DuplicateAttemptError, error.message
-        end
-
-        # stalled_executions, executions_for_resource, save_step_attempt,
-        # step_attempts and the attempt queries are plain dataset filters.
-      end
-    end
-  end
-end
-```
+[lepus-saga-active_record](https://github.com/marcosgz/lepus-saga-active_record) and [lepus-saga-sequel](https://github.com/marcosgz/lepus-saga-sequel) are complete adapters to start from: models, store, migrations and the shared examples run on PostgreSQL, MySQL/MariaDB and SQLite.
 
 ## Development
 
