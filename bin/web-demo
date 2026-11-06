@@ -341,9 +341,10 @@ module WebDemo
 
     def stalled(now)
       STALLED.each do |saga, step, count, type|
+        resource_id = SAGAS.find { |_, _, sample_type| sample_type == type }.last
         count.times do
           progress = now - (1200 + rand * 6 * 3600)
-          as_of(progress - 30) { execution(saga, step, [type, "#{type.downcase[0, 4]}_#{SecureRandom.hex(3)}"], at: progress - 30, progress_at: progress) }
+          as_of(progress - 30) { execution(saga, step, [type, resource_id.call], at: progress - 30, progress_at: progress) }
         end
       end
     end

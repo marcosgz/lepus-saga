@@ -69,7 +69,7 @@ function story(data, frames, stallMs) {
     case "compensated": {
       const failedStep = attempts.filter((a) => a.direction === "execute" && a.status === "failed").pop();
       return failedStep
-        ? [h("b", {}, failedStep.step_name), " failed, then ", plural(undone, "step"), " were undone in ", took, "."]
+        ? [h("b", {}, failedStep.step_name), " failed, then ", plural(undone, "step"), undone === 1 ? " was undone in " : " were undone in ", took, "."]
         : ["Compensated: ", plural(undone, "step"), " undone in ", took, "."];
     }
     case "compensating": return ["Undoing ", step, " now."];
