@@ -1,0 +1,13 @@
+/.bundle/
+/.yardoc
+/_yardoc/
+/coverage/
+/doc/
+/pkg/
+/spec/reports/
+/.rspec_status
+/tmp/
+lepus-saga-*.gem
+/.env
+.tool-versions
+.ruby-version
