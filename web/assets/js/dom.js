@@ -9,7 +9,7 @@ function apply(el, attrs) {
   }
 }
 
-function append(el, children) {
+export function append(el, children) {
   for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));

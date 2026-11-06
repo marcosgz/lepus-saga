@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { h, s, clear, toast, copyButton, reducedMotion } from "../dom.js";
+import { h, s, append, clear, toast, copyButton, reducedMotion } from "../dom.js";
 import { every, pollMs } from "../live.js";
 import { LineMap } from "../map.js";
 import { ago, duration, offset, plural, stamp, statusLabel, toTime } from "../format.js";
@@ -338,7 +338,7 @@ export function execution(root, { id, me }) {
     history.append(...rows);
     const ctx = h("div", {});
 
-    root.append(
+    append(root, [
       h("p", { class: "crumbs" }, h("a", { href: "#/executions" }, "Executions"), " / ",
         h("a", { href: `#/executions?saga=${encodeURIComponent(execution.saga_name)}` }, execution.saga_name)),
       h("div", { class: "x-head" },
@@ -365,7 +365,7 @@ export function execution(root, { id, me }) {
             h("h2", { class: "section-title" }, "Other runs for this resource"),
             h("ul", { class: "related" }, related.map((other) => h("li", {}, h("a", { href: `#/executions/${encodeURIComponent(other.id)}` },
               h("span", { class: `state state-${other.status}` }, statusLabel(other.status)), stamp(other.started_at)))))) : null))
-    );
+    ]);
 
     els = { play, range, now, rows, ctx };
     map = new LineMap(mapHost, { mode: "single", label: `${execution.saga_name} line` });
