@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.2 - Unreleased
+* Fixed: the console's execution page no longer shows a stray "null" under the summary when the execution has no failure reason
+
 ## 0.3.1 - Unreleased
 * Fixed: executions list in time order when their ids are not time-ordered (e.g. random UUIDv4): `list_executions` sorts by started_at and pages by `after` (the last row's id) instead of by id, `executions_for_resource` orders by started_at, and the stalled list and failure samples break ties by id only after time
 * Added: `duration_ms` on executions (`ExecutionBehaviour::ATTRIBUTES`), written by the engine when an execution ends (completed, compensated, failed, compensation_failed, abandoned) and cleared when a retry reopens it; `finish_attributes` and `reopen_attributes` on `ExecutionBehaviour`
