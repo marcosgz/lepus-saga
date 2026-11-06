@@ -30,7 +30,7 @@ module Lepus
               current_step: target.name, failure_reason: reason)
           else
             store.update_execution(execution,
-              status: "failed", failure_reason: reason, finished_at: Time.now.utc)
+              status: "failed", failure_reason: reason, **execution.finish_attributes)
           end
           execution
         end
@@ -182,7 +182,7 @@ module Lepus
         finished = with_fresh_lock do
           now = Time.now.utc
           store.finish_step_attempt(attempt, "succeeded", context_after: new_context)
-          store.update_execution(execution, context: new_context, status: "completed", finished_at: now,
+          store.update_execution(execution, context: new_context, status: "completed", **execution.finish_attributes(now),
             last_progress_at: now, resume_count: 0)
         end
         return :ack unless finished
@@ -231,7 +231,7 @@ module Lepus
       def apply_failure(reason)
         if execution.compensate_direction?
           store.update_execution(execution, status: "compensation_failed", failure_reason: reason,
-            finished_at: Time.now.utc)
+            **execution.finish_attributes)
           :compensation_failed
         else
           self.class.begin_compensation(execution, reason: reason)
@@ -270,7 +270,7 @@ module Lepus
 
       def complete_as(status)
         execution.status = status
-        execution.finished_at = Time.now.utc
+        execution.finish_attributes.each { |name, value| execution.public_send(:"#{name}=", value) }
         "saga.#{status}"
       end
 

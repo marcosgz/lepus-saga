@@ -110,7 +110,7 @@ RSpec.describe Lepus::Saga::Web do
 
       expect(json["executions"].map { |row| row["id"] }).to eq([running.id])
       expect(json["executions"].first).to include("partition" => "billing", "status" => "running", "current_step" => "charge")
-      expect(json["next_before"]).to be_nil
+      expect(json["next"]).to be_nil
     end
 
     it "filters by the error class and step of a failed attempt" do
@@ -149,20 +149,48 @@ RSpec.describe Lepus::Saga::Web do
       expect(json["error"]).to eq("Stalled executions are running or compensating")
     end
 
-    it "pages backwards by id" do
-      ids = Array.new(3) { create_execution.id }.sort.reverse
+    it "pages by started_at, latest first, after the last row shown" do
+      ids = [2, 3, 1].map { |hour| create_execution(created_at: ago(hours(hour))).id }
 
       get "/api/executions", limit: 2
       first = json
-      get "/api/executions", limit: 2, before: first["next_before"]
+      get "/api/executions", limit: 2, after: first["next"]
 
-      expect(first["executions"].map { |row| row["id"] }).to eq(ids.first(2))
-      expect(first["next_before"]).to eq(ids[1])
-      expect(json["executions"].map { |row| row["id"] }).to eq([ids.last])
-      expect(json["next_before"]).to be_nil
+      expect(first).to include("sort" => "started_at", "dir" => "desc", "next" => ids[0])
+      expect(first["executions"].map { |row| row["id"] }).to eq([ids[2], ids[0]])
+      expect(json["executions"].map { |row| row["id"] }).to eq([ids[1]])
+      expect(json["next"]).to be_nil
     end
 
-    it "filters by created_at" do
+    it "sorts by started_at or duration in either direction" do
+      slow = create_execution(status: "completed", created_at: ago(hours(3)))
+      store.update_execution(slow, duration_ms: 90_000)
+      fast = create_execution(status: "completed", created_at: ago(hours(2)))
+      store.update_execution(fast, duration_ms: 1_200)
+      running = create_execution(created_at: ago(hours(1)))
+
+      get "/api/executions", sort: "started_at", dir: "asc"
+      expect(json["executions"].map { |row| row["id"] }).to eq([slow.id, fast.id, running.id])
+
+      get "/api/executions", sort: "duration"
+      expect(json["executions"].map { |row| row["id"] }).to eq([slow.id, fast.id, running.id])
+      expect(json["executions"].map { |row| row["duration_ms"] }).to eq([90_000, 1_200, nil])
+
+      get "/api/executions", sort: "duration", dir: "asc", limit: 1, after: fast.id
+      expect(json["executions"].map { |row| row["id"] }).to eq([slow.id])
+      expect(json["next"]).to eq(slow.id)
+    end
+
+    it "rejects unknown sorts" do
+      get "/api/executions", sort: "resource_id"
+      expect(last_response.status).to eq(400)
+      expect(json["error"]).to eq("sort must be one of started_at, duration")
+
+      get "/api/executions", dir: "up"
+      expect(last_response.status).to eq(400)
+    end
+
+    it "filters by started_at" do
       create_execution(created_at: ago(days(2)))
       recent = create_execution(created_at: ago(hours(1)))
 
@@ -190,10 +218,10 @@ RSpec.describe Lepus::Saga::Web do
 
       get "/api/moving", per_station: 2
 
-      expect(json).to include("stalled_after" => 900, "omitted" => 0)
+      expect(json).to include("stalled_after" => 900, "omitted" => 0, "now" => be_a(String))
       expect(json["stations"].map { |station| station.values_at("saga_name", "step_name", "count") })
         .to eq([["orders.checkout", "charge", 3], ["orders.checkout", "ship", 1]])
-      expect(json["stations"].first["executions"].map { |row| row["id"] }).to eq(charging.map(&:id).sort.last(2).reverse)
+      expect(json["stations"].first["executions"].map { |row| row["id"] }).to eq(charging.last(2).reverse.map(&:id))
       expect(json["stations"].last["executions"].map { |row| row["id"] }).to eq([shipping.id])
     end
 
@@ -205,6 +233,58 @@ RSpec.describe Lepus::Saga::Web do
 
       expect(json["stations"].size).to eq(1)
       expect(json["omitted"]).to eq(1)
+    end
+  end
+
+  describe "GET /api/recent" do
+    def finish(execution, status, at:, attempts: [])
+      attempts.each_with_index do |(step, direction, attempt_status), index|
+        record = store.create_step_attempt(execution, step_name: step, direction: direction, epoch: 0, attempt: index + 1, started_at: at - 1)
+        store.update_step_attempt(record, status: attempt_status, finished_at: at)
+      end
+      direction = (attempts.any? { |_step, attempt_direction, _| attempt_direction == "compensate" }) ? "compensate" : "execute"
+      current = attempts.last&.first || "reserve"
+      store.update_execution(execution, status: status, direction: direction, current_step: current, finished_at: at, duration_ms: 1_000)
+    end
+
+    it "lists the executions that finished since the given time per saga, with the steps they passed" do
+      since = ago(minutes(1))
+      completed = finish(create_execution(created_at: ago(minutes(2))), "completed", at: ago(30),
+        attempts: [%w[reserve execute succeeded], %w[charge execute succeeded], %w[ship execute succeeded]])
+      failed = finish(create_execution(created_at: ago(40)), "failed", at: ago(20), attempts: [%w[reserve execute failed]])
+      compensated = finish(create_execution(created_at: ago(40)), "compensated", at: ago(10),
+        attempts: [%w[reserve execute succeeded], %w[charge execute failed], %w[reserve compensate succeeded]])
+      finish(create_execution(created_at: ago(hours(1))), "completed", at: ago(minutes(5)))
+      create_execution
+
+      get "/api/recent", since: since.iso8601(3)
+
+      expect(json).to include("since" => since.utc.iso8601(3), "now" => be_a(String))
+      line = sole(json["lines"])
+      expect(line).to include("saga_name" => "orders.checkout", "total" => 3, "counts" => {"completed" => 1, "failed" => 1, "compensated" => 1})
+      expect(line["executions"].map { |row| row.values_at("id", "status", "reached", "back_to") }).to eq([
+        [compensated.id, "compensated", "charge", "reserve"],
+        [failed.id, "failed", "reserve", nil],
+        [completed.id, "completed", "ship", nil]
+      ])
+      expect(line["executions"].first).to include("started_at", "finished_at", "duration_ms" => 1_000)
+    end
+
+    it "keeps per_saga executions of each line and counts the rest" do
+      3.times { |index| finish(create_execution, "completed", at: ago(index + 1)) }
+
+      get "/api/recent", since: ago(minutes(1)).iso8601, per_saga: 2
+
+      expect(sole(json["lines"])).to include("total" => 3, "counts" => {"completed" => 3})
+      expect(sole(json["lines"])["executions"].size).to eq(2)
+    end
+
+    it "needs a since before now" do
+      get "/api/recent"
+      expect(last_response.status).to eq(400)
+
+      get "/api/recent", since: (Time.now.utc + 60).iso8601
+      expect(last_response.status).to eq(400)
     end
   end
 

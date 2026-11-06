@@ -152,6 +152,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
       expect(execution.status).to eq("completed")
       expect(execution.finished_at).not_to be_nil
+      expect(execution.duration_ms).to be_within(1).of((execution.finished_at - execution.started_at) * 1000)
       expect(execution.context).to include("first_output" => "ok", "second_output" => "ok")
       expect(succeeded_steps(execution)).to eq(%w[first second third])
     end
@@ -174,6 +175,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = start_and_drain("complete_on_first" => true)
 
       expect(execution.status).to eq("completed")
+      expect(execution.duration_ms).to be >= 0
       expect(execution.context["completed_reason"]).to eq("early exit")
       expect(attempts(execution).map(&:step_name)).to eq(%w[first])
     end
@@ -197,6 +199,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = start_and_drain("second_transient_failures" => 99)
 
       expect(execution.status).to eq("compensated")
+      expect(execution.duration_ms).to be_within(1).of((execution.finished_at - execution.started_at) * 1000)
       expect(execution.failure_reason).to eq("transient boom")
       expect(attempt_statuses(execution, "second")).to eq(%w[failed failed])
       expect(sole(attempts(execution, step_name: "first", direction: "compensate")).status).to eq("succeeded")
@@ -215,6 +218,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = start_and_drain("fail_first" => true)
 
       expect(execution.status).to eq("failed")
+      expect(execution.duration_ms).to be >= 0
       expect(execution.failure_reason).to eq("first rejected")
       expect(attempts(execution, direction: "compensate")).to be_empty
     end
@@ -231,6 +235,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = start_and_drain("fail_second" => true, "fail_undo_first" => true)
 
       expect(execution).to have_attributes(status: "compensation_failed", current_step: "first", direction: "compensate")
+      expect(execution.duration_ms).to be >= 0
     end
 
     it "acks stale-epoch messages without running anything" do
@@ -353,7 +358,8 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = start_and_drain("fail_first" => true)
 
       expect(Lepus::Saga.retry(execution)).to equal(execution)
-      expect(execution).to have_attributes(status: "running", epoch: 1, failure_reason: nil, finished_at: nil)
+      expect(execution).to have_attributes(status: "running", epoch: 1, failure_reason: nil, finished_at: nil, duration_ms: nil)
+      expect(reload(execution)).to have_attributes(finished_at: nil, duration_ms: nil)
     end
 
     it "refuses to retry completed executions" do
@@ -533,6 +539,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       expect(Lepus::Saga.resume_stuck).to eq(0)
       expect(reload(execution).status).to eq("failed")
       expect(reload(execution).finished_at).not_to be_nil
+      expect(reload(execution).duration_ms).to be >= 0
     end
 
     it "gives an abandoned execution a fresh budget on manual retry" do

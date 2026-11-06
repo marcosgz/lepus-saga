@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { h, s, clear, refill } from "../dom.js";
+import { h, s, clear, refill, reducedMotion } from "../dom.js";
 import { every, pollMs } from "../live.js";
 import { LineMap } from "../map.js";
 import { rememberSagas } from "../sagas.js";
@@ -14,6 +14,13 @@ const PER_STATION = 9;
 const STATIONS_FETCHED = 40;
 const SETTLE_PER_POLL = 12;
 const SLOW_MS = 30_000;
+const REPLAY_PER_LINE = 8;
+const REPLAY_MS = 1000;
+const OVERLAP_MS = 2000;
+const HANDLED_KEPT = 5000;
+const NOTE_MIN_MS = 4000;
+const TERMINAL = ["completed", "compensated", "failed", "compensation_failed"];
+const ENDINGS = [["completed", "completed", "done"], ["compensated", "compensated", "back"], ["failed", "failed", "stop"], ["compensation_failed", "compensation failed", "stop"]];
 
 function symbol(kind) {
   const svg = s("svg", { viewBox: "0 0 20 20", "aria-hidden": "true" });
@@ -21,7 +28,12 @@ function symbol(kind) {
   if (kind === "idle") svg.append(s("rect", { class: "sym-idle", x: 2, y: 5.5, width: 16, height: 9, rx: 4.5 }));
   if (kind === "stop") svg.append(s("rect", { class: "sym-stop", x: 7, y: 0, width: 6, height: 20, rx: 2 }));
   if (kind === "back") svg.append(s("rect", { class: "sym-back", x: 1, y: 5, width: 18, height: 10, rx: 5 }));
+  if (kind === "replay") svg.append(s("rect", { class: "sym-replay", x: 1, y: 5, width: 18, height: 10, rx: 5 }));
   return h("span", { class: "sym" }, svg);
+}
+
+function keyItem(kind, text) {
+  return h("li", {}, symbol(kind), text);
 }
 
 const shortError = (name) => (name ? name.split("::").pop() : "Unknown error");
@@ -75,6 +87,7 @@ export function overview(root, { me, params }) {
     h("span", { class: "range-label", id: "range-label" }, "Time range"),
     h("div", { class: "seg range", role: "group", "aria-labelledby": "range-label" }, rangeButtons));
   const subline = h("p", { class: "subline" });
+  const mapKey = h("ul", { class: "m-key", "aria-label": "Map key" });
   const mapHost = h("div", { class: "map" });
   const throughputNote = h("p", { class: "section-note" });
   const throughputHost = h("div", { class: "tp" });
@@ -89,6 +102,7 @@ export function overview(root, { me, params }) {
     headline,
     rangeGroup,
     subline,
+    mapKey,
     mapHost,
     h("section", { class: "through", "aria-labelledby": "through-title" },
       h("div", { class: "through-head" },
@@ -109,8 +123,16 @@ export function overview(root, { me, params }) {
   );
   const throughput = new Throughput(throughputHost);
 
+  function describeKey() {
+    const finished = reducedMotion.matches ? "Just finished, summed up at the end of the line" : "Just finished";
+    refill(mapKey, keyItem("move", "Running"), keyItem("back", "Compensating"), keyItem("idle", "Stalled"),
+      keyItem("stop", "Failed"), keyItem("replay", finished));
+  }
+  describeKey();
+  reducedMotion.addEventListener("change", describeKey);
+
   function describeRange() {
-    subline.textContent = `Each line is a saga and each stop a step. Tokens are executions in flight right now, placed by how long they have spent in the step: halfway to the next stop at the step's median. Red bars are failures in ${range.phrase}. Point at a stop for exact counts, select it to list its executions.`;
+    subline.textContent = `Each line is a saga and each stop a step. Tokens are executions in flight right now, placed by how long they have spent in the step: halfway to the next stop at the step's median. Between refreshes, finished executions run on to how they ended, and ones that started and finished in between replay their path in a lighter shade. Red bars are failures in ${range.phrase}. Point at a stop for exact counts, select it to list its executions.`;
     throughputNote.textContent = `Executions per ${range.per} in ${range.phrase}, stacked by how they ended. The line counts starts.`;
     attentionMore.href = `#/executions?status=failed&range=${range.key}`;
   }
@@ -140,6 +162,20 @@ export function overview(root, { me, params }) {
   let expected = new Map();
   let first = true;
   let destroyed = false;
+  // Server time of the last poll: the next one asks what finished since.
+  let serverNow = null;
+  const handled = new Map();
+  const probe = { continued: 0, replayed: 0, collapsed: 0 };
+
+  function remember(id) {
+    handled.set(id, true);
+    if (handled.size > HANDLED_KEPT) handled.delete(handled.keys().next().value);
+  }
+
+  function tally(key, n) {
+    probe[key] += n;
+    mapHost.dataset[key] = String(probe[key]);
+  }
 
   const lineFor = (saga) => definitions.get(saga);
   const stepIndex = (saga, step) => {
@@ -161,7 +197,7 @@ export function overview(root, { me, params }) {
     const spec = { id: token.id, line: token.saga, rail: back ? "back" : "fwd", target: token.index };
     if (token.exit === "completed") return { ...spec, rail: "fwd", target: n, kind: "move", leave: true, creep: null, linger: 0.2 };
     if (token.exit === "compensated") return { ...spec, rail: "back", target: -1, kind: "back", leave: true, creep: null, linger: 0.2 };
-    if (token.exit === "failed") return { ...spec, kind: "stop", leave: true, creep: null, linger: 1.6 };
+    if (token.exit === "failed") return { ...spec, kind: "stop", leave: true, creep: null, linger: 1.6, flash: true };
     if (token.exit) return { ...spec, leave: true, creep: null };
     const ms = expected.get(`${token.saga}|${token.step}|${token.direction}`) || MEDIAN_FALLBACK_MS;
     return {
@@ -185,11 +221,99 @@ export function overview(root, { me, params }) {
     map.setTokens(specs, partialStations);
   }
 
+  // A token seen moving that has since finished runs on from where it is.
+  function finishToken(token, execution) {
+    const back = execution.status === "compensation_failed";
+    token.exit = execution.status === "compensation_failed" ? "failed" : execution.status;
+    if (token.exit === "failed") {
+      token.index = stepIndex(token.saga, back ? execution.back_to : execution.reached);
+      token.direction = back ? "compensate" : "execute";
+    }
+    setTimeout(() => { tokens.delete(token.id); }, 4000);
+  }
+
+  // The whole path of an execution that started and finished between polls.
+  function replaySpec(execution, def) {
+    const n = def.steps.length;
+    const reached = stepIndex(execution.saga_name, execution.reached);
+    const backTo = stepIndex(execution.saga_name, execution.back_to);
+    if (execution.status === "completed") return { legs: [{ rail: "fwd", to: n }], end: "done" };
+    if (reached < 0) return null;
+    if (execution.status === "failed") return { legs: [{ rail: "fwd", to: reached }], end: "stop" };
+    if (execution.status === "compensated") return { legs: [{ rail: "fwd", to: reached }, { rail: "back", to: -1 }], end: "done" };
+    if (execution.status === "compensation_failed" && backTo >= 0) {
+      return { legs: [{ rail: "fwd", to: reached }, { rail: "back", to: backTo }], end: "stop" };
+    }
+    return null;
+  }
+
+  // Executions that finished since the last poll: the ones seen moving run
+  // on to their end, the others replay quickly, staggered over the poll in
+  // the order they started, at most REPLAY_PER_LINE a line. After a pause
+  // only the last poll interval is animated; the rest of each line is a
+  // count at its end, and with reduced motion every line just sums up how
+  // its executions ended.
+  function finishLines(recent, since) {
+    const now = toTime(recent.now);
+    const interval = pollMs();
+    const resumed = now - since > interval * 2;
+    const cut = resumed ? now - interval : -Infinity;
+    const reduce = reducedMotion.matches;
+    const replays = [];
+    const notes = [];
+    for (const line of recent.lines) {
+      const def = lineFor(line.saga_name);
+      if (!def || !def.steps.length) continue;
+      const counts = { ...line.counts };
+      let total = line.total;
+      let continued = 0;
+      const fresh = [];
+      for (const execution of line.executions) {
+        if (handled.has(execution.id)) {
+          counts[execution.status] = Math.max(0, (counts[execution.status] || 0) - 1);
+          total--;
+          continue;
+        }
+        remember(execution.id);
+        const token = tokens.get(execution.id);
+        if (token && !token.exit) {
+          finishToken(token, execution);
+          continued++;
+        } else {
+          fresh.push(execution);
+        }
+      }
+      tally("continued", continued);
+      if (reduce) {
+        const parts = ENDINGS.filter(([status]) => counts[status]).map(([status, words, tone]) => ({ text: `${status === "completed" ? "+" : ""}${count(counts[status])} ${words}`, tone }));
+        if (parts.length) notes.push({ line: line.saga_name, parts });
+        continue;
+      }
+      const animated = fresh.filter((execution) => toTime(execution.finished_at) >= cut)
+        .map((execution) => ({ execution, spec: replaySpec(execution, def) }))
+        .filter(({ spec }) => spec)
+        .sort((a, b) => toTime(a.execution.started_at) - toTime(b.execution.started_at) || (a.execution.id < b.execution.id ? -1 : 1))
+        .slice(0, REPLAY_PER_LINE);
+      const spread = Math.max(0, Math.min(interval, now - Math.max(since, cut)) - REPLAY_MS);
+      animated.forEach(({ execution, spec }, index) => {
+        replays.push({ ...spec, id: execution.id, line: line.saga_name, duration: REPLAY_MS, delay: (index / Math.max(1, animated.length)) * spread });
+      });
+      tally("replayed", animated.length);
+      const left = Math.max(0, total - continued - animated.length);
+      if (left) {
+        if (resumed) tally("collapsed", left);
+        notes.push({ line: line.saga_name, parts: [{ text: `+${count(left)} ${resumed ? "finished while paused" : "just finished"}`, tone: "pale" }] });
+      }
+    }
+    return { replays, notes };
+  }
+
   async function settle(id) {
     const token = tokens.get(id);
+    remember(id);
     try {
       const { execution } = await api.execution(id);
-      token.exit = ["completed", "compensated", "failed", "compensation_failed"].includes(execution.status)
+      token.exit = TERMINAL.includes(execution.status)
         ? (execution.status === "compensation_failed" ? "failed" : execution.status)
         : "gone";
       token.index = stepIndex(token.saga, execution.current_step);
@@ -358,12 +482,15 @@ export function overview(root, { me, params }) {
 
   async function refresh() {
     const asked = range;
-    const [sagaData, stalledData, movingData] = await Promise.all([
+    const since = serverNow;
+    const [sagaData, stalledData, movingData, recentData] = await Promise.all([
       api.sagas({ from: rangeFrom(asked) }),
       api.stalled({ limit: WAITING_SHOWN }),
-      api.moving({ per_station: PER_STATION, stations: STATIONS_FETCHED })
+      api.moving({ per_station: PER_STATION, stations: STATIONS_FETCHED }),
+      since === null ? null : api.recent({ since: new Date(since - OVERLAP_MS).toISOString(), per_saga: REPLAY_PER_LINE }).catch(() => null)
     ]);
     if (destroyed || asked !== range) return;
+    serverNow = toTime(recentData ? recentData.now : movingData.now) || serverNow;
     rememberSagas(sagaData.sagas);
     definitions = new Map(sagaData.sagas.map((saga) => [saga.name, saga]));
 
@@ -416,6 +543,8 @@ export function overview(root, { me, params }) {
       return `${saga}|${stepIndex(saga, step)}`;
     }));
 
+    const finished = recentData ? finishLines(recentData, since) : { replays: [], notes: [] };
+
     // Tokens that left a fully listed station are looked up to show how they
     // ended; at a partial one they just drop out.
     let settling = 0;
@@ -430,6 +559,8 @@ export function overview(root, { me, params }) {
       settle(id);
     }
     sync();
+    map.replay(finished.replays);
+    if (finished.notes.length) map.setFinished(finished.notes, Math.max(NOTE_MIN_MS, pollMs()));
     first = false;
   }
 
@@ -458,6 +589,7 @@ export function overview(root, { me, params }) {
     destroy() {
       destroyed = true;
       stops.forEach((stop) => stop());
+      reducedMotion.removeEventListener("change", describeKey);
       map.destroy();
       throughput.destroy();
     }

@@ -34,12 +34,37 @@ RSpec.shared_examples "a lepus saga query store" do
     end)
   end
 
-  def query_execution(saga_name: checkout, status: "running", created_at: hour, finished_at: nil, **attributes)
+  def query_execution(saga_name: checkout, status: "running", created_at: hour, finished_at: nil, duration_ms: nil, **attributes)
     execution = store.create_execution({
       saga_name: saga_name, resource_type: "Order", resource_id: "order-1", current_step: "reserve",
       partition: nil, started_at: created_at, last_progress_at: created_at
     }.merge(attributes))
-    store.update_execution(execution, status: status, created_at: created_at, finished_at: finished_at)
+    store.update_execution(execution, status: status, created_at: created_at, finished_at: finished_at, duration_ms: duration_ms)
+  end
+
+  # Executions created in the order given, so their ids (time-ordered by
+  # creation) do not follow their started_at.
+  def started_at_minutes(*offsets, **attributes)
+    offsets.map { |minute| query_execution(created_at: hour + minutes(minute), **attributes) }
+  end
+
+  def finished(duration_ms, created_at: hour, **attributes)
+    query_execution(status: "completed", created_at: created_at, finished_at: created_at + duration_ms / 1000.0, duration_ms: duration_ms, **attributes)
+  end
+
+  def ids(executions) = executions.map(&:id)
+
+  def all_pages(size, **options)
+    pages = []
+    after = nil
+    loop do
+      page = store.list_executions(**options, after: after, limit: size)
+      break if page.empty?
+
+      pages << ids(page)
+      after = page.last.id
+    end
+    pages
   end
 
   def query_attempt(execution, step_name: "charge", attempt: 1, direction: "execute", status: "succeeded",
@@ -57,23 +82,82 @@ RSpec.shared_examples "a lepus saga query store" do
   end
 
   describe "#list_executions" do
-    it "returns execution records, newest id first" do
-      ids = Array.new(3) { query_execution.id }
+    it "returns execution records, latest start first, whatever the ids" do
+      executions = started_at_minutes(3, 0, 4, 1, 2)
+      by_start = ids(executions.sort_by(&:started_at).reverse)
 
-      executions = store.list_executions
-
-      expect(executions).to all(be_a(Lepus::Saga::ExecutionBehaviour))
-      expect(executions.map(&:id)).to eq(ids.sort.reverse)
+      expect(store.list_executions).to all(be_a(Lepus::Saga::ExecutionBehaviour))
+      expect(ids(store.list_executions)).to eq(by_start)
+      expect(ids(store.list_executions(sort: :started_at, direction: :asc))).to eq(by_start.reverse)
+      expect(ids(store.list_executions(sort: "started_at", direction: "desc", limit: 2))).to eq(by_start.first(2))
     end
 
-    it "pages with limit and before_id" do
-      ids = Array.new(5) { query_execution.id }.sort.reverse
+    it "breaks ties by id in the direction of the sort" do
+      tied = ids(started_at_minutes(1, 1, 1)).sort
+      later, earlier = started_at_minutes(2, 0)
 
-      first_page = store.list_executions(limit: 2)
-      second_page = store.list_executions(limit: 2, before_id: first_page.last.id)
-      last_page = store.list_executions(limit: 2, before_id: second_page.last.id)
+      expect(ids(store.list_executions)).to eq([later.id, *tied.reverse, earlier.id])
+      expect(ids(store.list_executions(direction: :asc))).to eq([earlier.id, *tied, later.id])
+    end
 
-      expect([first_page, second_page, last_page].map { |page| page.map(&:id) }).to eq(ids.each_slice(2).to_a)
+    it "pages after the last execution shown, through ties, without gaps or repeats" do
+      executions = started_at_minutes(2, 1, 1, 3, 1, 1, 0)
+
+      [:desc, :asc].each do |direction|
+        expected = ids(store.list_executions(direction: direction, limit: 100))
+        pages = all_pages(2, direction: direction)
+
+        expect(pages.flatten).to eq(expected)
+        expect(pages.map(&:size)).to eq([2, 2, 2, 1])
+        expect(expected).to match_array(ids(executions))
+      end
+    end
+
+    it "sorts by duration with executions that have none last in either direction" do
+      slow = finished(9_000)
+      running = query_execution
+      fast = finished(100)
+      compensating = query_execution(status: "compensating")
+      medium = finished(2_500)
+      unfinished = [running, compensating].map(&:id).sort
+
+      expect(ids(store.list_executions(sort: :duration))).to eq([slow.id, medium.id, fast.id, *unfinished.reverse])
+      expect(ids(store.list_executions(sort: :duration, direction: :asc))).to eq([fast.id, medium.id, slow.id, *unfinished])
+      expect(store.list_executions(sort: :duration, limit: 1).first.duration_ms).to eq(9_000)
+    end
+
+    it "pages by duration through ties and across executions without one" do
+      [400, nil, 200, 400, nil, 100, 400, nil].each_with_index do |duration, index|
+        duration ? finished(duration, created_at: hour + minutes(index)) : query_execution(created_at: hour + minutes(index))
+      end
+
+      page_sizes = [1, 2, 3, 5]
+      {desc: [400, 400, 400, 200, 100, nil, nil, nil], asc: [100, 200, 400, 400, 400, nil, nil, nil]}.each do |direction, durations|
+        listed = store.list_executions(sort: :duration, direction: direction, limit: 100)
+        page_sizes.each do |size|
+          expect(all_pages(size, sort: :duration, direction: direction).flatten).to eq(ids(listed))
+        end
+        expect(listed.map(&:duration_ms)).to eq(durations)
+      end
+    end
+
+    it "pages after an execution the filters leave out by its sort value" do
+      first, hidden, last = started_at_minutes(3, 2, 1)
+      hidden = store.update_execution(hidden, status: "failed")
+
+      expect(ids(store.list_executions(status: "running", after: hidden.id))).to eq([last.id])
+      expect(ids(store.list_executions(status: "running", after: first.id))).to eq([last.id])
+    end
+
+    it "returns an empty page after an id that names no execution" do
+      query_execution
+
+      expect(store.list_executions(after: "00000000-0000-4000-8000-000000000000")).to eq([])
+    end
+
+    it "rejects unknown sorts and directions" do
+      expect { store.list_executions(sort: :resource_id) }.to raise_error(ArgumentError)
+      expect { store.list_executions(direction: :sideways) }.to raise_error(ArgumentError)
     end
 
     it "filters by saga name and status, single or listed" do
@@ -128,7 +212,7 @@ RSpec.shared_examples "a lepus saga query store" do
       expect(store.list_executions(resource: "a_b").map(&:id)).to contain_exactly(underscore.id)
     end
 
-    it "bounds created_at by from (inclusive) and to (exclusive)" do
+    it "bounds started_at by from (inclusive) and to (exclusive)" do
       query_execution(created_at: hour - minutes(1))
       at_from = query_execution(created_at: hour)
       inside = query_execution(created_at: hour + minutes(30))
@@ -137,6 +221,62 @@ RSpec.shared_examples "a lepus saga query store" do
       expect(store.list_executions(from: hour, to: hour + hours(1)).map(&:id)).to contain_exactly(at_from.id, inside.id)
       expect(store.list_executions(from: hour + minutes(1)).size).to eq(2)
       expect(store.list_executions(to: hour).size).to eq(1)
+    end
+  end
+
+  describe "finished filter" do
+    it "bounds finished_at by finished_from (inclusive) and finished_to (exclusive)" do
+      query_execution(status: "completed", finished_at: hour - 1)
+      at_from = query_execution(status: "failed", finished_at: hour)
+      inside = query_execution(status: "completed", finished_at: hour + minutes(30))
+      query_execution(status: "completed", finished_at: hour + hours(1))
+      query_execution
+
+      expect(ids(store.list_executions(finished_from: hour, finished_to: hour + hours(1)))).to contain_exactly(at_from.id, inside.id)
+      expect(store.count_executions(group_by: :status, finished_from: hour)).to eq("failed" => 1, "completed" => 2)
+      expect(store.list_executions(finished_to: hour).size).to eq(1)
+    end
+  end
+
+  describe "#finished_executions" do
+    it "returns the executions that finished in the window, latest finish first, with counts by saga and status" do
+      query_execution(status: "completed", finished_at: hour - 1)
+      at_from = query_execution(status: "completed", finished_at: hour)
+      failed = query_execution(status: "failed", finished_at: hour + minutes(2))
+      compensated = query_execution(saga_name: invoice, status: "compensated", finished_at: hour + minutes(1))
+      query_execution(status: "completed", finished_at: hour + minutes(5))
+      query_execution
+
+      result = store.finished_executions(from: hour, to: hour + minutes(5))
+
+      expect(result[:executions]).to all(be_a(Lepus::Saga::ExecutionBehaviour))
+      expect(ids(result[:executions])).to eq([failed.id, compensated.id, at_from.id])
+      expect(result[:counts]).to eq([checkout, "completed"] => 1, [checkout, "failed"] => 1, [invoice, "compensated"] => 1)
+    end
+
+    it "keeps the latest per_saga of each saga and at most limit, counting every one" do
+      checkouts = [4, 1, 3, 2].map { |minute| query_execution(status: "completed", finished_at: hour + minutes(minute)) }
+      invoice_failed = query_execution(saga_name: invoice, status: "failed", finished_at: hour)
+      window = {from: hour, to: hour + hours(1)}
+
+      result = store.finished_executions(**window, per_saga: 2)
+
+      expect(ids(result[:executions])).to eq([checkouts[0].id, checkouts[2].id, invoice_failed.id])
+      expect(result[:counts]).to eq([checkout, "completed"] => 4, [invoice, "failed"] => 1)
+      expect(ids(store.finished_executions(**window, limit: 2)[:executions])).to eq([checkouts[0].id, checkouts[2].id])
+      expect(ids(store.finished_executions(**window, saga_name: [invoice])[:executions])).to eq([invoice_failed.id])
+    end
+
+    it "breaks finish ties by id, latest first" do
+      tied = Array.new(3) { query_execution(status: "completed", finished_at: hour) }
+
+      expect(ids(store.finished_executions(from: hour, to: hour + 1)[:executions])).to eq(ids(tied).sort.reverse)
+    end
+
+    it "is empty when nothing finished in the window" do
+      query_execution
+
+      expect(store.finished_executions(from: hour, to: hour + hours(1))).to eq(executions: [], counts: {})
     end
   end
 
@@ -228,7 +368,7 @@ RSpec.shared_examples "a lepus saga query store" do
   end
 
   describe "#execution_series" do
-    it "counts starts by created_at and terminal statuses by finished_at in aligned buckets" do
+    it "counts starts by started_at and terminal statuses by finished_at in aligned buckets" do
       query_execution(created_at: hour + minutes(5))
       query_execution(created_at: hour + minutes(10), status: "completed", finished_at: hour + minutes(20))
       query_execution(created_at: hour - hours(1), status: "failed", finished_at: hour + minutes(70))

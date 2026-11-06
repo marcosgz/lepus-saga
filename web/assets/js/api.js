@@ -41,6 +41,7 @@ export const api = {
   executions: (params) => request(url("executions", params)),
   execution: (id) => request(url(`executions/${encodeURIComponent(id)}`)),
   moving: (params) => request(url("moving", params)),
+  recent: (params) => request(url("recent", params)),
   series: (params) => request(url("series", params)),
   failures: (params) => request(url("insights/failures", params)),
   latency: (params) => request(url("insights/latency", params)),

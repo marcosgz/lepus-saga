@@ -6,7 +6,7 @@ module Lepus
       module Serializer
         EXECUTION_FIELDS = %i[
           id saga_name resource_type resource_id status current_step direction
-          epoch correlation_id failure_reason resume_count
+          epoch correlation_id failure_reason resume_count duration_ms
         ].freeze
         EXECUTION_TIMES = %i[started_at finished_at last_progress_at created_at updated_at].freeze
         ATTEMPT_FIELDS = %i[
@@ -22,6 +22,20 @@ module Lepus
           data[:partition] = partition(record)
           data[:context] = record.context if context
           data
+        end
+
+        # A finished execution and the steps it passed: `reached` is the
+        # furthest step it ran forward and, on the compensation path,
+        # `back_to` the last step it compensated (or failed compensating).
+        def finished(record, attempts)
+          steps = Array(Lepus::Saga.definitions[record.saga_name]&.steps).map(&:name)
+          forward = attempts.select { |attempt| attempt.direction == "execute" }.map(&:step_name)
+          reached = forward.max_by { |name| steps.index(name) || -1 } || record.current_step
+          {
+            id: record.id, saga_name: record.saga_name, status: record.status,
+            started_at: time(record.started_at), finished_at: time(record.finished_at), duration_ms: record.duration_ms,
+            reached: reached, back_to: (record.current_step if record.compensate_direction?)
+          }
         end
 
         def attempt(record)

@@ -29,6 +29,9 @@ module Lepus
         QUERY_MAX_ROWS = 50_000
         MAX_SERIES_BUCKETS = 1_000
         GROUPABLE = %i[saga_name status partition current_step].freeze
+        SORTS = {started_at: :started_at, duration: :duration_ms, finished_at: :finished_at}.freeze
+        NULLABLE_SORTS = %i[duration_ms finished_at].freeze
+        DIRECTIONS = %i[desc asc].freeze
         SERIES_KEYS = ["started", *ExecutionBehaviour::TERMINAL_STATUSES].freeze
         LATENCY_STATUSES = %w[succeeded failed].freeze
         PERCENTILES = {p50: 50, p95: 95, p99: 99}.freeze
@@ -87,7 +90,8 @@ module Lepus
           raise NotImplementedError
         end
 
-        # Executions of a resource, most recently created first.
+        # Executions of a resource, most recently started first (ties by id,
+        # descending).
         def executions_for_resource(resource_type, resource_id)
           raise NotImplementedError
         end
@@ -139,23 +143,38 @@ module Lepus
         # Whether the optional query methods below are implemented.
         def queries? = false
 
-        # Executions matching the filters, newest first by id (UUIDv7, so by
-        # creation time), at most `limit` of them. `before_id` returns the
-        # page after the execution with that id. Every filter is optional:
-        # `saga_name`, `status` and `current_step` take a value or a list;
-        # `partition` matches the partition column, and executions without one
-        # whose definition runs in that partition; `resource` is a
-        # case-insensitive substring of resource_type or resource_id; `from`
-        # (inclusive) and `to` (exclusive) bound created_at, `progress_from`
-        # and `progress_to` bound last_progress_at the same way (in-progress
-        # executions with `progress_to: Time.now.utc - 15 * 60` are the
-        # stalled ones). `error_class` and `error_step` take a value or a list
-        # and keep executions with a failed attempt of that error class and at
-        # that step (either filter alone matches on its own attribute);
+        # Executions matching the filters, at most `limit` of them, in the
+        # order of `sort` and `direction`:
+        #
+        # - `sort: :started_at` (the default), `:duration` (duration_ms) or
+        #   `:finished_at`, `direction: :desc` (the default) or `:asc`. The id
+        #   breaks ties in the same direction. Executions without a value
+        #   (in-progress ones have no duration_ms or finished_at) come last in
+        #   either direction, by id. Ids need not follow time: rows written
+        #   with ids that are not time-ordered (e.g. random UUIDv4) still list
+        #   in time order.
+        # - `after` is the id of the last execution of the previous page: the
+        #   page holds the executions strictly after it, by (sort value, id),
+        #   in the same order. An `after` that names no execution returns an
+        #   empty page.
+        #
+        # Every filter is optional: `saga_name`, `status` and `current_step`
+        # take a value or a list; `partition` matches the partition column,
+        # and executions without one whose definition runs in that partition;
+        # `resource` is a case-insensitive substring of resource_type or
+        # resource_id; `from` (inclusive) and `to` (exclusive) bound
+        # started_at, `progress_from` and `progress_to` bound
+        # last_progress_at and `finished_from` and `finished_to` bound
+        # finished_at the same way (in-progress executions with
+        # `progress_to: Time.now.utc - 15 * 60` are the stalled ones).
+        # `error_class` and `error_step` take a value or a list and keep
+        # executions with a failed attempt of that error class and at that
+        # step (either filter alone matches on its own attribute);
         # `error_from` (inclusive) and `error_to` (exclusive) bound that
         # failed attempt's started_at, the window #failure_summary counts.
-        def list_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil, before_id: nil, limit: 50)
+        def list_executions(sort: :started_at, direction: :desc, after: nil, limit: 50, saga_name: nil, status: nil, current_step: nil,
+          partition: nil, resource: nil, from: nil, to: nil, progress_from: nil, progress_to: nil, finished_from: nil, finished_to: nil,
+          error_class: nil, error_step: nil, error_from: nil, error_to: nil)
           raise NotImplementedError
         end
 
@@ -165,11 +184,33 @@ module Lepus
         # resolves executions without one to their definition's partition
         # (nil for an unknown saga).
         def count_executions(group_by:, saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil)
+          progress_from: nil, progress_to: nil, finished_from: nil, finished_to: nil, error_class: nil, error_step: nil, error_from: nil,
+          error_to: nil)
           raise NotImplementedError
         end
 
-        # Executions started (by created_at) and finished in each terminal
+        # Executions that finished between `from` (inclusive) and `to`
+        # (exclusive), latest finish first (ties by id), at most `per_saga`
+        # of each saga when given and at most `limit` in all. `saga_name`
+        # takes a value or a list. Returns `{executions: [...], counts:
+        # {[saga_name, status] => n}}`, the counts covering every execution
+        # that finished in the window, so a caller can tell how many the
+        # limits left out. Built on #list_executions and #count_executions.
+        def finished_executions(from:, to:, saga_name: nil, per_saga: nil, limit: 100)
+          window = {saga_name: saga_name, finished_from: from, finished_to: to}
+          counts = count_executions(group_by: %i[saga_name status], **window)
+          executions = if per_saga
+            counts.keys.map(&:first).uniq.sort.flat_map do |name|
+              list_executions(**window, saga_name: name, sort: :finished_at, limit: [per_saga, limit].min)
+            end
+          else
+            list_executions(**window, sort: :finished_at, limit: limit)
+          end
+          ordered = executions.sort_by { |execution| [execution.finished_at.to_r, execution.id] }.reverse
+          {executions: ordered.first(limit), counts: counts}
+        end
+
+        # Executions started (by started_at) and finished in each terminal
         # status (by finished_at) per `bucket` seconds between `from` and
         # `to`. Returns `{rows: [[bucket_start, {"started" => n, "completed" =>
         # n, ...}], ...], truncated:}` with every bucket of the window, bucket
@@ -224,6 +265,16 @@ module Lepus
 
         def assign(record, attributes)
           attributes.each { |name, value| record.public_send(:"#{name}=", value) }
+        end
+
+        # The column and direction of a #list_executions order, and whether
+        # the column may hold nulls.
+        def list_order(sort, direction)
+          column = SORTS[sort.to_s.to_sym] || raise(ArgumentError, "Cannot sort executions by #{sort.inspect}")
+          descending = direction.to_s.to_sym
+          raise ArgumentError, "Unknown sort direction #{direction.inspect}" unless DIRECTIONS.include?(descending)
+
+          [column, descending == :desc, NULLABLE_SORTS.include?(column)]
         end
 
         def filter_values(value)

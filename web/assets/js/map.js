@@ -7,7 +7,8 @@ import { isLive, now as clock, onLive } from "./live.js";
 // are the stations, n is the end terminal. Tokens ride the main line ("fwd")
 // or the compensation rail beneath it ("back"). Tokens heading out of the
 // same station share up to three lanes; past SEGMENT_SHOWN the rest ride as
-// one "+N" pill.
+// one "+N" pill. Executions that finished between two polls without being
+// seen live replay their whole path quickly, in a lighter shade.
 
 const RAIL_OFFSET = 12;
 const LANES = { fwd: [0, -8, -16], back: [RAIL_OFFSET, RAIL_OFFSET + 7, RAIL_OFFSET + 14] };
@@ -16,6 +17,8 @@ const SEGMENT_SHOWN = 8;
 const CREEP_MIN = 0.1;
 const CREEP_MAX = 0.9;
 const CREEP_FRAME_MS = 66;
+const FADE_IN_MS = 150;
+const FLASH_S = 1.4;
 
 export class LineMap {
   constructor(host, { mode = "lines", label = "Saga lines" } = {}) {
@@ -24,6 +27,7 @@ export class LineMap {
     this.label = label;
     this.lines = [];
     this.tokens = new Map();
+    this.finished = new Map();
     this.width = 0;
     this.frame = null;
     this.svg = s("svg", { role: "group", "aria-label": label });
@@ -41,6 +45,7 @@ export class LineMap {
     this.offLive();
     cancelAnimationFrame(this.frame);
     clearTimeout(this.slowTimer);
+    clearTimeout(this.finishedTimer);
     this.frame = null;
   }
 
@@ -75,15 +80,50 @@ export class LineMap {
       seen.add(spec.id);
       const token = this.tokens.get(spec.id);
       if (token) {
+        // A token that stops moving leaves from where it was drawn, not from
+        // where its lane had held it back.
+        if (spec.leave && !token.leave && token.shownPos !== undefined) token.pos = token.shownPos;
         Object.assign(token, { leave: false }, spec);
       } else {
         this.tokens.set(spec.id, { pos: spec.from ?? spec.target, opacity: spec.from !== undefined && !reducedMotion.matches ? 0 : 1, ...spec });
       }
     }
     for (const [id, token] of this.tokens) {
-      if (!seen.has(id) && !token.leave) token.leave = true;
+      if (seen.has(id) || token.leave || token.replay) continue;
+      if (token.shownPos !== undefined) token.pos = token.shownPos;
+      token.leave = true;
     }
     this.wake();
+  }
+
+  // Executions that started and finished between two polls. Each runs its
+  // legs ([{rail, to}], from the start terminal) in `duration` ms after
+  // `delay` ms, then ends "done" (fades out) or "stop" (flashes, then fades).
+  replay(specs) {
+    const start = performance.now();
+    for (const spec of specs) {
+      if (this.tokens.has(spec.id)) continue;
+      this.tokens.set(spec.id, {
+        id: spec.id, line: spec.line, pos: -1, target: -1, rail: "fwd", kind: "move", opacity: 0,
+        replay: { legs: spec.legs, end: spec.end, duration: spec.duration, start: start + (spec.delay || 0) }
+      });
+    }
+    this.wake();
+  }
+
+  // Notes drawn at the end of a line for `ms`: [{line, parts: [{text, tone}]}],
+  // tone being "done", "back", "stop" or "pale".
+  setFinished(notes, ms) {
+    const until = performance.now() + ms;
+    for (const note of notes) this.finished.set(note.line, { ...note, until });
+    clearTimeout(this.finishedTimer);
+    const expire = () => {
+      const now = performance.now();
+      for (const [line, note] of this.finished) if (note.until <= now) this.finished.delete(line);
+      this.drawTokens();
+      if (this.finished.size) this.finishedTimer = setTimeout(expire, Math.max(50, Math.min(...[...this.finished.values()].map((note) => note.until)) - now));
+    };
+    expire();
   }
 
   // Replay: put one token exactly where the caller says, no animation.
@@ -431,6 +471,11 @@ export class LineMap {
 
     for (const [id, token] of this.tokens) {
       if (token.fixed) continue;
+      if (token.replay) {
+        if (reduce || !this.advanceReplay(token, now, dt)) this.tokens.delete(id);
+        else busy = true;
+        continue;
+      }
       const target = this.effectiveTarget(token);
       const gap = target - token.pos;
       if (reduce) {
@@ -476,6 +521,41 @@ export class LineMap {
     }
   }
 
+  // Moves a replayed token along its legs; false once it has faded out.
+  advanceReplay(token, now, dt) {
+    const replay = token.replay;
+    const elapsed = now - replay.start;
+    if (elapsed < 0) {
+      token.opacity = 0;
+      return true;
+    }
+    const total = replay.legs.reduce((sum, leg, index) => sum + Math.abs(leg.to - (index ? replay.legs[index - 1].to : -1)), 0) || 1;
+    let along = Math.min(1, elapsed / replay.duration) * total;
+    let from = -1;
+    for (const [index, leg] of replay.legs.entries()) {
+      const length = Math.abs(leg.to - from);
+      if (along <= length || index === replay.legs.length - 1) {
+        token.pos = from + Math.sign(leg.to - from) * Math.min(along, length);
+        token.rail = leg.rail;
+        token.kind = leg.rail === "back" ? "back" : "move";
+        break;
+      }
+      along -= length;
+      from = leg.to;
+    }
+    token.opacity = Math.min(1, elapsed / FADE_IN_MS);
+    if (elapsed < replay.duration) return true;
+
+    token.hold = (token.hold || 0) + dt;
+    const linger = replay.end === "stop" ? FLASH_S : 0.25;
+    if (replay.end === "stop") {
+      token.kind = "stop";
+      token.flash = true;
+    }
+    if (token.hold > linger) token.opacity = 1 - (token.hold - linger) * 2.2;
+    return token.opacity > 0;
+  }
+
   // Tokens leaving the same station on the same rail form a segment group.
   // The group shows its first SEGMENT_SHOWN tokens (stable by id) in up to
   // three lanes and folds the rest, plus any the poll did not list, into a pill.
@@ -491,7 +571,9 @@ export class LineMap {
       const geo = byLine.get(token.line);
       if (!geo) continue;
       if (token.kind === "idle" && !token.leave) continue;
-      if (token.fixed || token.leave || this.layout.single) loose.push({ token, geo });
+      if (token.replay) {
+        if (token.opacity > 0) loose.push({ token, geo });
+      } else if (token.fixed || token.leave || this.layout.single) loose.push({ token, geo });
       else group(geo, token.rail, token.target).tokens.push(token);
     }
     if (!this.layout.single && this.tokensKnown) {
@@ -533,7 +615,9 @@ export class LineMap {
       const ahead = (p) => (p.x * geo.axis.x + p.y * geo.axis.y) * dir;
       const floor = ahead(this.point(geo, target)) + 10;
       const ceiling = Math.max(floor, ahead(this.point(geo, target + dir)) - (geo.vertical ? 22 : 64));
+      const segment = Math.max(1, Math.abs(ahead(this.point(geo, target + dir)) - ahead(this.point(geo, target))));
       const candidates = shown.map((token) => {
+        token.shownPos = token.pos;
         const p = this.point(geo, token.pos);
         return { token, p, raw: ahead(p), at: Math.min(ahead(p), ceiling) };
       }).sort((a, b) => b.at - a.at);
@@ -554,6 +638,7 @@ export class LineMap {
         front[lane] = at;
         const shift = (item.raw - at) * dir;
         item.p = { x: item.p.x - geo.axis.x * shift, y: item.p.y - geo.axis.y * shift };
+        item.token.shownPos = item.token.pos - (item.raw - at) / segment * dir;
         item.lane = lane;
         placed.push(item);
       }
@@ -566,6 +651,27 @@ export class LineMap {
       }
       if (rest > 0) this.drawPill(layer, geo, rail, target, rest, hidden);
     }
+
+    for (const [name, note] of this.finished) {
+      const geo = byLine.get(name);
+      if (geo && !this.layout.single) this.drawNote(layer, geo, note);
+    }
+  }
+
+  // A "+N just finished" pill, or a summary of how executions ended, by the
+  // end terminal of the line.
+  drawNote(layer, geo, note) {
+    const text = note.parts.map((part) => part.text).join(" · ");
+    const w = Math.round(text.length * 6.6 + 18);
+    const hgt = 20;
+    const cx = geo.vertical ? geo.end.x + 26 + w / 2 : geo.end.x - 14 - w / 2;
+    const cy = geo.vertical ? geo.end.y : geo.end.y - 30;
+    const label = s("text", { class: "t-note-n", x: cx, y: cy + 4, "text-anchor": "middle" });
+    note.parts.forEach((part, index) => {
+      if (index) label.append(s("tspan", { class: "t-note-sep" }, " · "));
+      label.append(s("tspan", { class: `t-note-${part.tone || "pale"}` }, part.text));
+    });
+    layer.append(s("rect", { class: "t-note", x: cx - w / 2, y: cy - hgt / 2, width: w, height: hgt, rx: hgt / 2 }), label);
   }
 
   isPartial(geo, index) {
@@ -579,6 +685,15 @@ export class LineMap {
     const hgt = geo.vertical ? long : short;
     const opacity = token.opacity < 1 ? Math.max(0, token.opacity).toFixed(3) : null;
     const moving = token.kind === "move" || token.kind === "back";
+    const state = token.replay ? "replay" : token.leave ? "exit" : "live";
+    if (token.flash && token.hold) {
+      const fade = Math.max(0, 1 - token.hold / FLASH_S);
+      const pulse = 0.5 + 0.5 * Math.cos(token.hold * Math.PI * 4);
+      layer.append(s("rect", {
+        class: "t-flash", x: p.x - w / 2 - 6, y: p.y - hgt / 2 - 6, width: w + 12, height: hgt + 12, rx: short / 2 + 6,
+        opacity: (fade * pulse * 0.55 * Math.max(0, Math.min(1, token.opacity))).toFixed(3)
+      }));
+    }
     if (moving && trail) {
       const dir = token.kind === "back" ? -1 : 1;
       const length = token.big ? 70 : 46;
@@ -587,10 +702,14 @@ export class LineMap {
       const tw = geo.vertical ? 4 : length;
       const th = geo.vertical ? length : 4;
       const grad = `${this.uid}-${geo.vertical ? "v" : "h"}-${dir > 0 ? "f" : "b"}-${token.kind}`;
-      layer.append(s("rect", { fill: `url(#${grad})`, x: tx - tw / 2, y: ty - th / 2, width: tw, height: th, rx: 2, opacity }));
+      const trailOpacity = token.replay ? (Math.max(0, token.opacity) * 0.5).toFixed(3) : opacity;
+      layer.append(s("rect", { fill: `url(#${grad})`, x: tx - tw / 2, y: ty - th / 2, width: tw, height: th, rx: 2, opacity: trailOpacity }));
     }
-    const cls = ["t-token", token.kind && token.kind !== "move" ? `is-${token.kind}` : "", thin ? "is-thin" : ""].join(" ").trim();
-    layer.append(s("rect", { class: cls, x: p.x - w / 2, y: p.y - hgt / 2, width: w, height: hgt, rx: short / 2, opacity }));
+    const cls = ["t-token", token.kind && token.kind !== "move" ? `is-${token.kind}` : "", thin ? "is-thin" : "", token.replay ? "is-replay" : ""].join(" ").trim();
+    layer.append(s("rect", {
+      class: cls, x: p.x - w / 2, y: p.y - hgt / 2, width: w, height: hgt, rx: short / 2, opacity,
+      "data-token": token.id, "data-state": state
+    }));
   }
 
   drawPill(layer, geo, rail, target, rest, hidden) {
