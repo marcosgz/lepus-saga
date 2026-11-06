@@ -478,7 +478,11 @@ export class LineMap {
       }
       const target = this.effectiveTarget(token);
       const gap = target - token.pos;
-      if (reduce) {
+      const backward = !token.leave && Math.sign(gap) === (token.rail === "back" ? 1 : -1);
+      if (backward) {
+        // A refresh that lands a live token behind where it is waits for it
+        // to catch up rather than pulling it back.
+      } else if (reduce) {
         token.pos = target;
       } else if (Math.abs(gap) > 0.004) {
         const speed = Math.max(0.12, Math.min(3, Math.abs(gap) * 2.2));
@@ -625,17 +629,26 @@ export class LineMap {
       const placed = [];
       let folded = 0;
       for (const item of candidates) {
-        let lane = front.findIndex((at) => at - item.at >= LANE_GAP);
+        // A token keeps its lane and is never drawn behind where it was while
+        // it stays on this leg, so a newcomer never pushes it back.
+        const held = item.token.drawn;
+        const same = held && held.geo === geo && held.target === target && held.rail === rail;
+        let lane = same && front[held.lane] - item.at >= LANE_GAP ? held.lane : front.findIndex((at) => at - item.at >= LANE_GAP);
         let at = item.at;
         if (lane < 0) {
           lane = front.indexOf(Math.max(...front));
           at = front[lane] - LANE_GAP;
-          if (at < floor) {
+          if (at < floor && !same) {
             folded++;
             continue;
           }
         }
-        front[lane] = at;
+        if (same && at < held.at) {
+          at = held.at;
+          lane = held.lane;
+        }
+        item.token.drawn = { geo, target, rail, lane, at };
+        front[lane] = Math.min(front[lane], at);
         const shift = (item.raw - at) * dir;
         item.p = { x: item.p.x - geo.axis.x * shift, y: item.p.y - geo.axis.y * shift };
         item.token.shownPos = item.token.pos - (item.raw - at) / segment * dir;
