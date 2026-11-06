@@ -18,6 +18,8 @@ This gem is the engine and has no ORM dependency. Storage comes from an adapter:
 
 ## Installation
 
+lepus-saga runs on plain Ruby and does not depend on ActiveSupport. Like Lepus, it fits into Rails when ActiveSupport is there: durations such as `15.minutes` are accepted wherever seconds are, engine events reach `ActiveSupport::Notifications`, and the optional `Lepus::Saga::ResumeStuckJob` runs on ActiveJob.
+
 ```ruby
 gem "lepus-saga"
 gem "lepus-saga-active_record"
@@ -38,10 +40,12 @@ Lepus::Saga.configure do |config|
   config.exchange_name = "lepus.saga"            # topic exchange; queues are "<exchange>.execute[.<partition>]"
   config.max_resumes = 5                         # re-publishes of a stalled execution before it is abandoned
   config.backlog_threshold = 100                 # ready messages above which a partition counts as backlogged
-  config.backlog_patience = 2.hours              # stall time behind a backlog before one re-publish
-  config.stale_running_attempt_after = 5.minutes # running attempts older than this are closed as abandoned
+  config.backlog_patience = 2 * 3600             # seconds stalled behind a backlog before one re-publish
+  config.stale_running_attempt_after = 5 * 60    # seconds after which a running attempt is closed as abandoned
 end
 ```
+
+Durations are seconds. With ActiveSupport loaded, `2.hours` and other `ActiveSupport::Duration` values work as well.
 
 Configure it before the consumer classes load, because `saga_partition` reads the exchange and queue names when the class body runs.
 
@@ -103,12 +107,12 @@ Failed attempts are rejected into a TTL retry queue (`retry_delay` in millisecon
 ```ruby
 Lepus::Saga.retry(execution)                     # restart a failed/stuck execution from its current step
 Lepus::Saga.compensate(execution, reason: "...") # force compensation of a non-terminal execution
-Lepus::Saga.resume_stuck(older_than: 15.minutes, limit: 100, max_resumes: Lepus::Saga.config.max_resumes)
+Lepus::Saga.resume_stuck(older_than: 15 * 60, limit: 100, max_resumes: Lepus::Saga.config.max_resumes)
 ```
 
 `retry` and `compensate` lock the execution, reload the record you pass in place and return it.
 
-`resume_stuck` re-publishes executions whose cursor has not moved for `older_than`. An execution re-published `max_resumes` times without progress is compensated, or failed when there is nothing to undo. While a partition's queue holds more than `backlog_threshold` ready messages, its executions are left alone and re-published once after `backlog_patience`.
+`resume_stuck` re-publishes executions whose cursor has not moved for `older_than` seconds. An execution re-published `max_resumes` times without progress is compensated, or failed when there is nothing to undo. While a partition's queue holds more than `backlog_threshold` ready messages, its executions are left alone and re-published once after `backlog_patience`.
 
 Schedule it with the bundled ActiveJob (`require "lepus/saga/resume_stuck_job"`, needs `activejob`), e.g. in Solid Queue's `config/recurring.yml`:
 
@@ -125,7 +129,7 @@ Without ActiveJob, call it from any scheduler:
 class SagaResumeStuckWorker
   include Sidekiq::Job
 
-  def perform = Lepus::Saga.resume_stuck(older_than: 15.minutes)
+  def perform = Lepus::Saga.resume_stuck(older_than: 15 * 60)
 end
 ```
 
@@ -207,7 +211,7 @@ The font is Overpass, under the SIL Open Font License (`web/assets/fonts/overpas
 
 ## Instrumentation and logging
 
-Events go through `Lepus.instrument`, so they are suffixed with `.lepus`: `saga.started`, `saga.step.started`, `saga.step.finished`, `saga.step.failed`, `saga.step.skipped`, `saga.completed`, `saga.compensation_started`, `saga.compensated`, `saga.failed`, `saga.compensation_failed`, `saga.resumed`. The payload carries the execution record under `:execution`.
+Events go through `Lepus.instrument`, which publishes them to `ActiveSupport::Notifications` when it is loaded and does nothing otherwise. They are suffixed with `.lepus`: `saga.started`, `saga.step.started`, `saga.step.finished`, `saga.step.failed`, `saga.step.skipped`, `saga.completed`, `saga.compensation_started`, `saga.compensated`, `saga.failed`, `saga.compensation_failed`, `saga.resumed`. The payload carries the execution record under `:execution`.
 
 ```ruby
 ActiveSupport::Notifications.subscribe(/\Asaga\./) do |name, _started, _finished, _id, payload|
@@ -377,6 +381,8 @@ end
 ```bash
 bin/setup
 bundle exec rspec       # memory store
+BUNDLE_GEMFILE=ci/Gemfile.no_activesupport bundle install
+BUNDLE_GEMFILE=ci/Gemfile.no_activesupport bundle exec rspec  # without ActiveSupport or ActiveJob
 bundle exec rubocop
 bin/web-demo            # the web console on a seeded memory store
 ```

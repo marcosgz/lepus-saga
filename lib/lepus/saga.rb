@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
 require "securerandom"
-require "active_support"
-require "active_support/core_ext"
 require "lepus"
 require_relative "saga/version"
 
@@ -140,15 +138,16 @@ module Lepus
       #
       # Returns the number of executions re-published; abandoned ones are not
       # counted, they are failed.
-      def resume_stuck(older_than: 15.minutes, limit: 100, max_resumes: config.max_resumes)
+      def resume_stuck(older_than: 15 * 60, limit: 100, max_resumes: config.max_resumes)
         resumed = handled = 0
         backlogged = Hash.new { |memo, partition| memo[partition] = QueueDepth.call(partition) > config.backlog_threshold }
 
-        store.stalled_executions(before: older_than.ago).each do |execution|
+        now = Time.now.utc
+        store.stalled_executions(before: now - older_than).each do |execution|
           break if handled >= limit
 
           if backlogged[execution.partition]
-            next unless execution.resume_count.zero? && execution.last_progress_at <= config.backlog_patience.ago
+            next unless execution.resume_count.zero? && execution.last_progress_at <= now - config.backlog_patience
           elsif execution.resume_count >= max_resumes
             handled += 1
             abandon_stalled(execution, max_resumes)
@@ -165,7 +164,7 @@ module Lepus
       private
 
       def ensure_retryable!(execution)
-        return if execution.status.in?(%w[failed compensation_failed running compensating])
+        return if %w[failed compensation_failed running compensating].include?(execution.status)
 
         raise NotRetryableError, "Cannot retry execution in status #{execution.status}"
       end

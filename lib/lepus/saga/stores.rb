@@ -21,11 +21,18 @@ module Lepus
         end
 
         def lookup(name)
-          const_name = name.to_s.camelize
-          require "lepus/saga/stores/#{name.to_s.underscore}" unless const_defined?(const_name, false)
+          path = Lepus::Primitive::String.new(name.to_s).underscore
+          const_name = camelize(path)
+          require "lepus/saga/stores/#{path}" unless const_defined?(const_name, false)
           const_get(const_name, false)
         rescue LoadError, NameError => error
           raise ConfigurationError, "Unknown saga store #{name.inspect} (#{error.message})"
+        end
+
+        private
+
+        def camelize(path)
+          path.split("/").map { |part| part.split("_").map(&:capitalize).join }.join("::")
         end
       end
     end

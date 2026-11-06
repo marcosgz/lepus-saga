@@ -4,14 +4,21 @@ require "bundler/setup"
 require "logger"
 require "lepus/saga"
 require "lepus/saga/testing"
-require "lepus/saga/resume_stuck_job"
 require "lepus/saga/rspec"
 require "pry"
+
+ACTIVE_SUPPORT = Gem.loaded_specs.key?("activesupport")
+
+if ACTIVE_SUPPORT
+  require "active_support"
+  require "active_support/core_ext"
+  require "lepus/saga/resume_stuck_job"
+  ActiveJob::Base.logger = Logger.new(File::NULL)
+end
 
 Dir[File.expand_path("support/**/*.rb", __dir__)].sort.each { |file| require file }
 
 Lepus.logger = Logger.new(File::NULL)
-ActiveJob::Base.logger = Logger.new(File::NULL)
 Lepus::Saga.configure { |config| config.store = :memory }
 
 RSpec.configure do |config|
@@ -27,6 +34,13 @@ RSpec.configure do |config|
   end
 
   config.include SagaHelpers
+  config.include Lepus::Saga::ExampleHelpers
+
+  if ACTIVE_SUPPORT
+    config.filter_run_excluding :without_active_support
+  else
+    config.filter_run_excluding :active_support
+  end
 
   config.before do
     Lepus::Testing.enable!

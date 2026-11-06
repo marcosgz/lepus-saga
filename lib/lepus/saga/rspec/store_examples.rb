@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "helpers"
+
 # The contract every store must meet. The including group defines `store`
 # and starts each example with empty storage:
 #
@@ -12,6 +14,8 @@
 # Pass `concurrency: false` for a backend that cannot be shared by threads
 # (an in-memory SQLite database, for example) to skip the threaded examples.
 RSpec.shared_examples "a lepus saga store" do |concurrency: true|
+  include Lepus::Saga::ExampleHelpers
+
   def create_execution(**attributes)
     store.create_execution({
       saga_name: "store_contract.saga",
@@ -21,14 +25,14 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
       context: {"key" => "value"},
       correlation_id: nil,
       partition: nil,
-      started_at: Time.current,
-      last_progress_at: Time.current
+      started_at: Time.now.utc,
+      last_progress_at: Time.now.utc
     }.merge(attributes))
   end
 
   def create_attempt(execution, **attributes)
     store.create_step_attempt(execution, {
-      step_name: "first", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current
+      step_name: "first", direction: "execute", epoch: 0, attempt: 1, started_at: Time.now.utc
     }.merge(attributes))
   end
 
@@ -53,12 +57,12 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
         status: "running", direction: "execute", epoch: 0, resume_count: 0,
         failure_reason: nil, finished_at: nil
       )
-      expect(execution.created_at).to be_within(1).of(Time.current)
-      expect(execution.updated_at).to be_within(1).of(Time.current)
+      expect(execution.created_at).to be_within(1).of(Time.now.utc)
+      expect(execution.updated_at).to be_within(1).of(Time.now.utc)
     end
 
     it "stores the given attributes" do
-      started_at = 1.minute.ago
+      started_at = ago(minutes(1))
       execution = create_execution(
         resource_id: "resource-9", correlation_id: "corr-1", partition: "priority",
         context: {"nested" => {"list" => [1, "two"]}}, started_at: started_at
@@ -76,7 +80,7 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
     it "defaults context to an empty hash" do
       execution = store.create_execution(
         saga_name: "store_contract.saga", resource_type: "Resource", resource_id: "1",
-        current_step: "first", started_at: Time.current, last_progress_at: Time.current
+        current_step: "first", started_at: Time.now.utc, last_progress_at: Time.now.utc
       )
 
       expect(store.find_execution(execution.id).context).to eq({})
@@ -112,7 +116,7 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
       execution.epoch = 2
       execution.failure_reason = "boom " * 100
       execution.context = {"after" => true}
-      execution.finished_at = Time.current
+      execution.finished_at = Time.now.utc
 
       expect(store.save_execution(execution)).to eq(execution)
       expect(store.find_execution(execution.id)).to have_attributes(
@@ -135,7 +139,7 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
     it "assigns and persists the attributes" do
       execution = create_execution
 
-      store.update_execution(execution, status: "failed", finished_at: Time.current)
+      store.update_execution(execution, status: "failed", finished_at: Time.now.utc)
 
       expect(execution.status).to eq("failed")
       expect(store.find_execution(execution.id).status).to eq("failed")
@@ -335,30 +339,30 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
 
   describe "#stalled_executions" do
     it "returns in-progress executions stalled before the cutoff, oldest first" do
-      newer = create_execution(last_progress_at: 20.minutes.ago)
-      oldest = create_execution(last_progress_at: 2.hours.ago)
-      compensating = create_execution(last_progress_at: 1.hour.ago)
+      newer = create_execution(last_progress_at: ago(minutes(20)))
+      oldest = create_execution(last_progress_at: ago(hours(2)))
+      compensating = create_execution(last_progress_at: ago(hours(1)))
       store.update_execution(compensating, status: "compensating", direction: "compensate")
 
-      stalled = store.stalled_executions(before: 15.minutes.ago).to_a
+      stalled = store.stalled_executions(before: ago(minutes(15))).to_a
 
       expect(stalled.map(&:id)).to eq([oldest.id, compensating.id, newer.id])
       expect(stalled).to all(be_a(Lepus::Saga::ExecutionBehaviour))
     end
 
     it "skips executions that progressed recently or are terminal" do
-      create_execution(last_progress_at: 1.minute.ago)
+      create_execution(last_progress_at: ago(minutes(1)))
       Lepus::Saga::ExecutionBehaviour::TERMINAL_STATUSES.each do |status|
-        store.update_execution(create_execution(last_progress_at: 1.hour.ago), status: status)
+        store.update_execution(create_execution(last_progress_at: ago(hours(1))), status: status)
       end
 
-      expect(store.stalled_executions(before: 15.minutes.ago).to_a).to be_empty
+      expect(store.stalled_executions(before: ago(minutes(15))).to_a).to be_empty
     end
 
     it "can be cut short by the caller" do
-      ids = Array.new(3) { |index| create_execution(last_progress_at: (index + 1).hours.ago).id }
+      ids = Array.new(3) { |index| create_execution(last_progress_at: ago(hours(index + 1))).id }
 
-      expect(store.stalled_executions(before: Time.current).first(2).map(&:id)).to eq(ids.last(2).reverse)
+      expect(store.stalled_executions(before: Time.now.utc).first(2).map(&:id)).to eq(ids.last(2).reverse)
     end
   end
 
@@ -382,7 +386,7 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
 
       expect(attempt).to be_a(Lepus::Saga::StepAttemptBehaviour)
       expect(attempt.id).to match(uuid_v7)
-      expect(store.step_attempts(execution).sole).to have_attributes(
+      expect(sole(store.step_attempts(execution))).to have_attributes(
         id: attempt.id, saga_execution_id: execution.id, step_name: "first", direction: "compensate",
         epoch: 1, attempt: 2, status: "running", context_after: {}, finished_at: nil
       )
@@ -425,15 +429,15 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
     let(:execution) { create_execution }
 
     it "closes the attempt with its context and duration" do
-      attempt = create_attempt(execution, started_at: 2.seconds.ago)
+      attempt = create_attempt(execution, started_at: ago(2))
 
       store.finish_step_attempt(attempt, "succeeded", context_after: {"out" => 1})
 
-      expect(store.step_attempts(execution).sole).to have_attributes(
+      expect(sole(store.step_attempts(execution))).to have_attributes(
         status: "succeeded", context_after: {"out" => 1}, error_class: nil, error_message: nil, error_backtrace: nil
       )
-      expect(store.step_attempts(execution).sole.finished_at).to be_within(1).of(Time.current)
-      expect(store.step_attempts(execution).sole.duration_ms).to be_within(1000).of(2000)
+      expect(sole(store.step_attempts(execution)).finished_at).to be_within(1).of(Time.now.utc)
+      expect(sole(store.step_attempts(execution)).duration_ms).to be_within(1000).of(2000)
     end
 
     it "records the error" do
@@ -446,18 +450,18 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
 
       store.finish_step_attempt(attempt, "failed", error: error)
 
-      expect(store.step_attempts(execution).sole).to have_attributes(
+      expect(sole(store.step_attempts(execution))).to have_attributes(
         status: "failed", error_class: "ArgumentError", error_message: "bad input " * 50
       )
-      expect(store.step_attempts(execution).sole.error_backtrace).to include("store_examples.rb")
+      expect(sole(store.step_attempts(execution)).error_backtrace).to include("store_examples.rb")
     end
   end
 
   describe "#step_attempts" do
     it "orders the execution's attempts by start time" do
       execution = create_execution
-      later = create_attempt(execution, step_name: "second", started_at: 1.minute.ago)
-      earlier = create_attempt(execution, step_name: "first", started_at: 2.minutes.ago)
+      later = create_attempt(execution, step_name: "second", started_at: ago(minutes(1)))
+      earlier = create_attempt(execution, step_name: "first", started_at: ago(minutes(2)))
       create_attempt(create_execution)
 
       expect(store.step_attempts(execution).map(&:id)).to eq([earlier.id, later.id])
@@ -469,12 +473,12 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
     let(:scope) { {step_name: "first", direction: "execute", epoch: 0} }
 
     before do
-      store.finish_step_attempt(create_attempt(execution, attempt: 1, started_at: 20.minutes.ago), "failed")
-      create_attempt(execution, attempt: 2, started_at: 10.minutes.ago)
-      create_attempt(execution, attempt: 3, started_at: 1.minute.ago)
-      create_attempt(execution, epoch: 1, started_at: 1.minute.ago)
-      create_attempt(execution, direction: "compensate", started_at: 10.minutes.ago)
-      create_attempt(execution, step_name: "second", started_at: 10.minutes.ago)
+      store.finish_step_attempt(create_attempt(execution, attempt: 1, started_at: ago(minutes(20))), "failed")
+      create_attempt(execution, attempt: 2, started_at: ago(minutes(10)))
+      create_attempt(execution, attempt: 3, started_at: ago(minutes(1)))
+      create_attempt(execution, epoch: 1, started_at: ago(minutes(1)))
+      create_attempt(execution, direction: "compensate", started_at: ago(minutes(10)))
+      create_attempt(execution, step_name: "second", started_at: ago(minutes(10)))
     end
 
     it "counts the attempts of the step, direction and epoch" do
@@ -484,13 +488,13 @@ RSpec.shared_examples "a lepus saga store" do |concurrency: true|
     end
 
     it "finds a running attempt started since the cutoff" do
-      expect(store.running_step_attempt?(execution, **scope, started_since: 5.minutes.ago)).to be(true)
-      expect(store.running_step_attempt?(execution, **scope, started_since: 30.seconds.ago)).to be(false)
-      expect(store.running_step_attempt?(execution, **scope, direction: "compensate", started_since: 5.minutes.ago)).to be(false)
+      expect(store.running_step_attempt?(execution, **scope, started_since: ago(minutes(5)))).to be(true)
+      expect(store.running_step_attempt?(execution, **scope, started_since: ago(30))).to be(false)
+      expect(store.running_step_attempt?(execution, **scope, direction: "compensate", started_since: ago(minutes(5)))).to be(false)
     end
 
     it "lists running attempts started before the cutoff" do
-      stale = store.stale_step_attempts(execution, **scope, started_before: 5.minutes.ago).to_a
+      stale = store.stale_step_attempts(execution, **scope, started_before: ago(minutes(5))).to_a
 
       expect(stale.map(&:attempt)).to eq([2])
       expect(stale).to all(be_a(Lepus::Saga::StepAttemptBehaviour))

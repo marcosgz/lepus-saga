@@ -64,20 +64,21 @@ module Lepus
         # resource has committed. `partition` overrides the definition's
         # partition for this execution only.
         def start(resource:, context: {}, correlation_id: nil, partition: nil)
-          raise ArgumentError, "#{name} has no saga_name" if saga_name.blank?
+          raise ArgumentError, "#{name} has no saga_name" if saga_name.to_s.strip.empty?
           raise ArgumentError, "#{name} has no steps" if steps.empty?
 
           type, id = resource_reference(resource)
+          now = Time.now.utc
           execution = Lepus::Saga.store.create_execution(
             saga_name: saga_name,
             resource_type: type,
             resource_id: id,
             current_step: steps.first.name,
-            context: context.stringify_keys,
+            context: context.transform_keys(&:to_s),
             correlation_id: correlation_id,
             partition: partition,
-            started_at: Time.current,
-            last_progress_at: Time.current
+            started_at: now,
+            last_progress_at: now
           )
           Instrumentation.saga_event("saga.started", execution)
           StepProducer.publish_step(execution)
@@ -109,7 +110,7 @@ module Lepus
 
       # Override for resources that need a custom lookup (composite keys etc).
       def find_resource
-        execution.resource_type.constantize.find(execution.resource_id)
+        Lepus::Primitive::String.new(execution.resource_type).constantize.find(execution.resource_id)
       end
 
       def complete!(reason = nil) = raise(Control::Complete, reason)

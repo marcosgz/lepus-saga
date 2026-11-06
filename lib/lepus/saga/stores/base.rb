@@ -148,7 +148,7 @@ module Lepus
         # case-insensitive substring of resource_type or resource_id; `from`
         # (inclusive) and `to` (exclusive) bound created_at, `progress_from`
         # and `progress_to` bound last_progress_at the same way (in-progress
-        # executions with `progress_to: Time.current - 15.minutes` are the
+        # executions with `progress_to: Time.now.utc - 15 * 60` are the
         # stalled ones). `error_class` and `error_step` take a value or a list
         # and keep executions with a failed attempt of that error class and at
         # that step (either filter alone matches on its own attribute);
@@ -227,7 +227,8 @@ module Lepus
         end
 
         def filter_values(value)
-          Array(value).map(&:to_s).presence
+          values = Array(value).map(&:to_s)
+          values unless values.empty?
         end
 
         def partition_saga_names(partition)
@@ -280,7 +281,7 @@ module Lepus
         def build_series(from, to, seconds, started, finished)
           first = from.to_i.div(seconds) * seconds
           rows = Array.new(series_size(from, to, seconds)) do |index|
-            [Time.at(first + index * seconds).utc, SERIES_KEYS.index_with(0)]
+            [Time.at(first + index * seconds).utc, SERIES_KEYS.to_h { |key| [key, 0] }]
           end
           started.each { |time| rows[(time.to_i - first).div(seconds)].last["started"] += 1 }
           finished.each { |time, status| rows[(time.to_i - first).div(seconds)].last[status] += 1 }

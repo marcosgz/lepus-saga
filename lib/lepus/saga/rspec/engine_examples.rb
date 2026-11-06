@@ -2,6 +2,7 @@
 
 require "lepus/testing"
 require "lepus/saga/testing"
+require_relative "helpers"
 
 # The engine's behaviour (executor, retry, compensate, resume_stuck) run end to
 # end on a store, with Lepus fake publishing. The including group defines
@@ -15,6 +16,8 @@ require "lepus/saga/testing"
 #
 # Pass `concurrency: false` to skip the examples that deliver from threads.
 RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
+  include Lepus::Saga::ExampleHelpers
+
   # Step behaviour is driven by the execution context so each example declares
   # its own scenario: "<step>_transient_failures" fails the first N attempts,
   # "fail_<step>" raises a permanent failure, "skip_second" skips, and
@@ -96,13 +99,23 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
   end
 
   def open_attempt(execution, **attributes)
-    store.create_step_attempt(execution, {step_name: "first", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current}.merge(attributes))
+    store.create_step_attempt(execution, {step_name: "first", direction: "execute", epoch: 0, attempt: 1, started_at: Time.now.utc}.merge(attributes))
   end
 
   def start_and_drain(context = {})
     execution = workflow.start(resource: resource, context: context)
     drain
     reload(execution)
+  end
+
+  # The [name, payload[key]] pairs of the saga events instrumented from now on.
+  def record_events(key = :step)
+    events = []
+    allow(Lepus).to receive(:instrument).and_wrap_original do |original, name, **payload, &block|
+      events << [name, payload[key]] if name.start_with?("saga.")
+      original.call(name, **payload, &block)
+    end
+    events
   end
 
   def perform_message(payload)
@@ -186,7 +199,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       expect(execution.status).to eq("compensated")
       expect(execution.failure_reason).to eq("transient boom")
       expect(attempt_statuses(execution, "second")).to eq(%w[failed failed])
-      expect(attempts(execution, step_name: "first", direction: "compensate").sole.status).to eq("succeeded")
+      expect(sole(attempts(execution, step_name: "first", direction: "compensate")).status).to eq("succeeded")
       expect(execution.context["undone_first"]).to be(true)
     end
 
@@ -243,7 +256,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
       expect(result).to eq(:ack)
       expect(attempts(execution)).to be_empty
-      expect(JSON.parse(saga_exchange.messages.sole[:payload])["step"]).to eq("second")
+      expect(JSON.parse(sole(saga_exchange.messages)[:payload])["step"]).to eq("second")
     end
 
     it "acks while another attempt is in flight" do
@@ -258,33 +271,33 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
     it "closes abandoned attempts and runs a fresh one" do
       execution = workflow.start(resource: resource)
-      stale = open_attempt(execution, started_at: 10.minutes.ago)
+      stale = open_attempt(execution, started_at: ago(minutes(10)))
 
       perform_message(execution_payload(execution, step: "first"))
 
-      expect(attempts(execution, id: stale.id).sole).to have_attributes(
+      expect(sole(attempts(execution, id: stale.id))).to have_attributes(
         status: "failed", error_class: Lepus::Saga::Executor::AbandonedAttempt.name
       )
-      expect(attempts(execution, attempt: 2).sole.status).to eq("succeeded")
+      expect(sole(attempts(execution, attempt: 2)).status).to eq("succeeded")
     end
 
     it "honours config.stale_running_attempt_after" do
-      allow(config).to receive(:stale_running_attempt_after).and_return(1.minute)
+      allow(config).to receive(:stale_running_attempt_after).and_return(minutes(1))
       execution = workflow.start(resource: resource)
-      stale = open_attempt(execution, started_at: 2.minutes.ago)
+      stale = open_attempt(execution, started_at: ago(minutes(2)))
 
       perform_message(execution_payload(execution, step: "first"))
 
-      expect(attempts(execution, id: stale.id).sole.status).to eq("failed")
+      expect(sole(attempts(execution, id: stale.id)).status).to eq("failed")
     end
 
     it "acks a duplicate attempt and keeps the store unchanged" do
       execution = workflow.start(resource: resource)
       allow(store).to receive(:count_step_attempts).and_return(0)
-      open_attempt(execution, started_at: 10.minutes.ago)
+      open_attempt(execution, started_at: ago(minutes(10)))
 
       expect(perform_message(execution_payload(execution, step: "first"))).to eq(:ack)
-      expect(attempts(execution).sole.status).to eq("running")
+      expect(sole(attempts(execution)).status).to eq("running")
     end
 
     it "acks messages for unknown executions" do
@@ -297,21 +310,16 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     end
 
     it "emits instrumentation events through the lifecycle" do
-      events = []
-      subscription = ActiveSupport::Notifications.subscribe(/^saga\./) do |name, *, payload|
-        events << [name, payload[:step]]
-      end
+      events = record_events
 
       start_and_drain
 
       expect(events).to include(
-        ["saga.started.lepus", nil],
-        ["saga.step.started.lepus", "first"],
-        ["saga.step.finished.lepus", "third"],
-        ["saga.completed.lepus", nil]
+        ["saga.started", nil],
+        ["saga.step.started", "first"],
+        ["saga.step.finished", "third"],
+        ["saga.completed", nil]
       )
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
 
     if concurrency
@@ -416,7 +424,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
       execution = workflow.start(resource: resource)
       perform_next_step if advance
       Lepus::Testing.clear_all_messages!
-      force_update(execution, last_progress_at: 1.hour.ago, resume_count: resume_count)
+      force_update(execution, last_progress_at: ago(hours(1)), resume_count: resume_count)
     end
 
     # One message only: Saga::Testing.drain runs to completion and raises if
@@ -437,7 +445,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     it "re-publishes the current step of a stalled execution" do
       execution = stalled_execution
 
-      expect(Lepus::Saga.resume_stuck(older_than: 15.minutes)).to eq(1)
+      expect(Lepus::Saga.resume_stuck(older_than: minutes(15))).to eq(1)
       drain
 
       expect(reload(execution).status).to eq("completed")
@@ -456,7 +464,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     # `updated_at` let it reset its own clock and it was never picked up again.
     it "re-publishes an execution that is still being written to" do
       execution = stalled_execution
-      force_update(execution, updated_at: Time.current)
+      force_update(execution, updated_at: Time.now.utc)
 
       expect(Lepus::Saga.resume_stuck).to eq(1)
       expect(reload(execution).resume_count).to eq(1)
@@ -464,21 +472,16 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
     it "reports the stored resume count" do
       stalled_execution(resume_count: 2)
-      counts = []
-      subscription = ActiveSupport::Notifications.subscribe("saga.resumed.lepus") do |*, payload|
-        counts << payload[:resume_count]
-      end
+      events = record_events(:resume_count)
 
       Lepus::Saga.resume_stuck
 
-      expect(counts).to eq([3])
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
+      expect(events).to eq([["saga.resumed", 3]])
     end
 
     it "leaves an execution whose cursor moved recently alone" do
       execution = stalled_execution
-      force_update(execution, last_progress_at: 1.minute.ago)
+      force_update(execution, last_progress_at: ago(minutes(1)))
 
       expect(Lepus::Saga.resume_stuck).to eq(0)
       expect(reload(execution).resume_count).to eq(0)
@@ -504,7 +507,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     it "does not abandon an execution that completed after it was listed" do
       execution = stalled_execution(resume_count: config.max_resumes, advance: true)
       listed = reload(execution)
-      force_update(execution, status: "completed", finished_at: Time.current)
+      force_update(execution, status: "completed", finished_at: Time.now.utc)
       allow(store).to receive(:stalled_executions).and_return([listed])
 
       Lepus::Saga.resume_stuck
@@ -525,7 +528,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     it "fails an execution that never recovers and has nothing to compensate" do
       execution = uncompensated.start(resource: resource)
       Lepus::Testing.clear_all_messages!
-      force_update(execution, last_progress_at: 1.hour.ago, resume_count: config.max_resumes)
+      force_update(execution, last_progress_at: ago(hours(1)), resume_count: config.max_resumes)
 
       expect(Lepus::Saga.resume_stuck).to eq(0)
       expect(reload(execution).status).to eq("failed")
@@ -552,7 +555,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
     it "resumes the oldest stall first" do
       newer = stalled_execution
       older = stalled_execution
-      force_update(older, last_progress_at: 2.hours.ago)
+      force_update(older, last_progress_at: ago(hours(2)))
 
       Lepus::Saga.resume_stuck(limit: 1)
 
@@ -597,14 +600,14 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
     it "re-publishes an execution stalled behind a backlog past the patience window" do
       execution = stalled_execution
-      force_update(execution, last_progress_at: (config.backlog_patience + 1.hour).ago)
+      force_update(execution, last_progress_at: ago(config.backlog_patience + hours(1)))
       fill_queue
 
       expect(Lepus::Saga.resume_stuck).to eq(1)
     end
 
     it "honours config.backlog_patience" do
-      allow(config).to receive(:backlog_patience).and_return(30.minutes)
+      allow(config).to receive(:backlog_patience).and_return(minutes(30))
       stalled_execution
       fill_queue
 
@@ -613,7 +616,7 @@ RSpec.shared_examples "a lepus saga engine" do |concurrency: true|
 
     it "re-publishes a backlogged execution only once" do
       execution = stalled_execution
-      force_update(execution, last_progress_at: (config.backlog_patience + 1.hour).ago)
+      force_update(execution, last_progress_at: ago(config.backlog_patience + hours(1)))
       fill_queue
       Lepus::Saga.resume_stuck
 

@@ -32,8 +32,8 @@ module Lepus
         @exchange_name = "lepus.saga"
         @max_resumes = 5
         @backlog_threshold = 100
-        @backlog_patience = 2.hours
-        @stale_running_attempt_after = 5.minutes
+        @backlog_patience = 2 * 3600
+        @stale_running_attempt_after = 5 * 60
         @store = nil
       end
 

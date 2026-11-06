@@ -4,7 +4,7 @@ RSpec.describe Lepus::Saga::QueueDepth do
   let(:execution) do
     Lepus::Saga.store.create_execution(
       saga_name: "orders.checkout", resource_type: "Order", resource_id: order.id,
-      current_step: "persist_local", started_at: Time.current
+      current_step: "persist_local", started_at: Time.now.utc
     )
   end
 

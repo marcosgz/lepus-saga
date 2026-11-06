@@ -10,7 +10,7 @@ module Lepus
 
         def initialize(reason = nil)
           @reason = reason
-          super(reason || self.class.name.demodulize.downcase)
+          super(reason || self.class.name.split("::").last.downcase)
         end
       end
 

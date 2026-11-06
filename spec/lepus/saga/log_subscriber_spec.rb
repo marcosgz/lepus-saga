@@ -5,13 +5,12 @@ RSpec.describe Lepus::Saga::LogSubscriber do
   let(:execution) do
     Lepus::Saga.store.create_execution(
       saga_name: "orders.checkout", resource_type: "Order", resource_id: order.id,
-      status: "completed", current_step: "persist_local", started_at: 1.minute.ago, finished_at: Time.current
+      status: "completed", current_step: "persist_local", started_at: ago(minutes(1)), finished_at: Time.now.utc
     )
   end
-  let!(:subscription) do
-    ActiveSupport::Notifications.subscribe(/\Asaga\./) do |name, _started, _finished, _id, payload|
-      described_class.call(name.delete_suffix(".lepus"), payload)
-    end
+
+  before do
+    allow(Lepus).to receive(:instrument) { |name, **payload| described_class.call(name, payload) }
   end
 
   around do |example|
@@ -20,7 +19,6 @@ RSpec.describe Lepus::Saga::LogSubscriber do
     example.run
   ensure
     Lepus.logger = previous_logger
-    ActiveSupport::Notifications.unsubscribe(subscription)
   end
 
   it "logs a completed saga with its resource" do
@@ -64,5 +62,23 @@ RSpec.describe Lepus::Saga::LogSubscriber do
     end
 
     expect(output.string).to be_empty
+  end
+
+  context "when subscribed through ActiveSupport::Notifications", :active_support do
+    let!(:subscription) do
+      ActiveSupport::Notifications.subscribe(/\Asaga\./) do |name, _started, _finished, _id, payload|
+        described_class.call(name.delete_suffix(".lepus"), payload)
+      end
+    end
+
+    after { ActiveSupport::Notifications.unsubscribe(subscription) }
+
+    it "logs the events Lepus.instrument publishes" do
+      allow(Lepus).to receive(:instrument).and_call_original
+
+      Lepus::Saga::Instrumentation.saga_event("saga.completed", execution)
+
+      expect(output.string).to include("saga.completed execution=#{execution.id}")
+    end
   end
 end

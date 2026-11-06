@@ -187,7 +187,7 @@ module Lepus
           minutes = integer(request, "minutes", default: nil, range: 1..)
           seconds = minutes ? minutes * 60 : config.stalled_after
           limit = integer(request, "limit", default: 50, range: 1..200)
-          rows = store.stalled_executions(before: Time.current - seconds).first(limit)
+          rows = store.stalled_executions(before: Time.now.utc - seconds).first(limit)
           {stalled_after: seconds, executions: rows.map { |execution| Serializer.execution(execution) }}
         end
 
@@ -196,7 +196,7 @@ module Lepus
         end
 
         def compensate_execution(request, id:)
-          reason = body(request)["reason"].to_s.strip.presence || "manually compensated"
+          reason = presence(body(request)["reason"].to_s.strip) || "manually compensated"
           {execution: Serializer.execution(Lepus::Saga.compensate(find_actionable!(id), reason: reason))}
         end
 
@@ -269,10 +269,10 @@ module Lepus
           filters.merge(status: statuses, progress_to: stalled_before)
         end
 
-        def stalled_before = Time.current - config.stalled_after
+        def stalled_before = Time.now.utc - config.stalled_after
 
         def window(request)
-          to = time(request, "to") || Time.current
+          to = time(request, "to") || Time.now.utc
           from = time(request, "from") || (to - DEFAULT_WINDOW)
           raise ArgumentError, "from must be before to" unless from < to
 
@@ -285,7 +285,7 @@ module Lepus
 
         def param(request, name)
           value = request.GET[name]
-          value.is_a?(String) ? value.strip.presence : nil
+          presence(value.strip) if value.is_a?(String)
         end
 
         def flag?(request, name)
@@ -293,7 +293,7 @@ module Lepus
         end
 
         def list(request, name)
-          param(request, name)&.split(",")&.map(&:strip)&.reject(&:empty?).presence
+          presence(param(request, name)&.split(",")&.map(&:strip)&.reject(&:empty?))
         end
 
         def time(request, name)
@@ -311,6 +311,10 @@ module Lepus
           raise ArgumentError, "#{name} must be an integer in #{range}" unless number && range.cover?(number)
 
           number
+        end
+
+        def presence(value)
+          value unless value.nil? || value.empty?
         end
 
         def json(status, data)

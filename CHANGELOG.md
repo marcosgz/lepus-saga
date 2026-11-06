@@ -25,3 +25,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * Changed: the web console is a live map of saga lines with moving tokens, a 1 h/24 h/7 d range, full-width throughput, "Needs attention" and "Waiting the longest", and a poll picker; insights and the Barlow/Atkinson fonts are gone in favour of Overpass
 * Added: `Web` `stalled_after` setting; `/api/sagas` counts stalled executions per step, `/api/moving` lists the moving executions of the busiest steps in one request, and `/api/executions` takes `stalled`, `error`, `error_step`, `error_from` and `error_to`
 * Added: `HEAVY=1 bin/web-demo` seeds thousands of failures, a crowded step and hundreds of stalled executions
+* Changed: ActiveSupport is no longer a dependency. Durations are seconds (`ActiveSupport::Duration` still works), store names resolve through `Lepus::Primitive::String` and the shared examples run without ActiveSupport

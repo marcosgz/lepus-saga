@@ -79,10 +79,10 @@ module Lepus
         end
 
         def create_execution(attributes)
-          now = Time.current
+          now = Time.now.utc
           row = {
             status: "running", direction: "execute", epoch: 0, resume_count: 0,
-            context: {}, last_progress_at: now, **attributes.symbolize_keys,
+            context: {}, last_progress_at: now, **attributes.transform_keys(&:to_sym),
             id: SecureRandom.uuid_v7, created_at: now, updated_at: now
           }
           Execution.new(insert(@executions, row))
@@ -93,7 +93,7 @@ module Lepus
         end
 
         def save_execution(execution)
-          execution.updated_at = Time.current
+          execution.updated_at = Time.now.utc
           update(@executions, execution.attributes)
           execution
         end
@@ -118,14 +118,14 @@ module Lepus
             execution.resume_count = @mutex.synchronize do
               row = @executions.fetch(execution.id) { raise RecordNotFound, "No execution #{execution.id}" }
               log_undo(@executions, execution.id)
-              @executions[execution.id] = row.merge(resume_count: row[:resume_count] + 1, updated_at: Time.current)
+              @executions[execution.id] = row.merge(resume_count: row[:resume_count] + 1, updated_at: Time.now.utc)
               row[:resume_count] + 1
             end
           end
         end
 
         def stalled_executions(before:)
-          where(@executions, Execution) { |row| row[:status].in?(ExecutionBehaviour::IN_PROGRESS_STATUSES) && row[:last_progress_at] < before }
+          where(@executions, Execution) { |row| ExecutionBehaviour::IN_PROGRESS_STATUSES.include?(row[:status]) && row[:last_progress_at] < before }
             .sort_by { |execution| [execution.last_progress_at, execution.id] }
         end
 
@@ -135,17 +135,17 @@ module Lepus
         end
 
         def create_step_attempt(execution, attributes)
-          now = Time.current
+          now = Time.now.utc
           row = {
             direction: "execute", epoch: 0, status: "running", context_after: {},
-            **attributes.symbolize_keys,
+            **attributes.transform_keys(&:to_sym),
             id: SecureRandom.uuid_v7, saga_execution_id: execution.id, created_at: now, updated_at: now
           }
           StepAttempt.new(insert(@step_attempts, row, unique: ATTEMPT_KEY))
         end
 
         def save_step_attempt(attempt)
-          attempt.updated_at = Time.current
+          attempt.updated_at = Time.now.utc
           update(@step_attempts, attempt.attributes)
           attempt
         end
@@ -204,7 +204,7 @@ module Lepus
 
         def step_latency(from:, to:, saga_name: nil, max_rows: QUERY_MAX_ROWS)
           attempts = attempts_with_saga(from, to, saga_name).select do |attempt, _|
-            attempt.status.in?(LATENCY_STATUSES) && attempt.duration_ms
+            LATENCY_STATUSES.include?(attempt.status) && attempt.duration_ms
           end
           samples, truncated = take_rows(
             attempts.sort_by { |attempt, _| attempt.started_at }.reverse
@@ -233,13 +233,14 @@ module Lepus
           sagas = filter_values(saga_name)
           statuses = filter_values(status)
           steps = filter_values(current_step)
-          partition_sagas = partition_saga_names(partition) if partition.present?
-          needle = resource.to_s.downcase.presence
+          partition_sagas = partition_saga_names(partition) unless partition.to_s.strip.empty?
+          needle = resource.to_s.downcase
+          needle = nil if needle.strip.empty?
           failing = failing_execution_ids(filter_values(error_class), filter_values(error_step), error_from, error_to)
           where(@executions, Execution) do |row|
-            (sagas.nil? || row[:saga_name].in?(sagas)) &&
-              (statuses.nil? || row[:status].in?(statuses)) &&
-              (steps.nil? || row[:current_step].in?(steps)) &&
+            (sagas.nil? || sagas.include?(row[:saga_name])) &&
+              (statuses.nil? || statuses.include?(row[:status])) &&
+              (steps.nil? || steps.include?(row[:current_step])) &&
               (from.nil? || row[:created_at] >= from) &&
               (to.nil? || row[:created_at] < to) &&
               (progress_from.nil? || row[:last_progress_at] >= progress_from) &&
@@ -256,8 +257,8 @@ module Lepus
           @mutex.synchronize do
             @step_attempts.each_value.filter_map do |row|
               next unless row[:status] == "failed"
-              next unless error_classes.nil? || row[:error_class].in?(error_classes)
-              next unless steps.nil? || row[:step_name].in?(steps)
+              next unless error_classes.nil? || error_classes.include?(row[:error_class])
+              next unless steps.nil? || steps.include?(row[:step_name])
               next if from && row[:started_at] < from
               next if to && row[:started_at] >= to
 
@@ -267,7 +268,7 @@ module Lepus
         end
 
         def in_partition?(row, partition, saga_names)
-          row[:partition] ? row[:partition] == partition : row[:saga_name].in?(saga_names)
+          row[:partition] ? row[:partition] == partition : saga_names.include?(row[:saga_name])
         end
 
         # Attempts started in the window as `[attempt, saga_name]` pairs.
@@ -275,7 +276,7 @@ module Lepus
           sagas = @mutex.synchronize { @executions.transform_values { |row| row[:saga_name] } }
           wanted = filter_values(saga_name)
           where(@step_attempts, StepAttempt) do |row|
-            (from...to).cover?(row[:started_at]) && (wanted.nil? || sagas[row[:saga_execution_id]].in?(wanted))
+            (from...to).cover?(row[:started_at]) && (wanted.nil? || wanted.include?(sagas[row[:saga_execution_id]]))
           end.map { |attempt| [attempt, sagas[attempt.saga_execution_id]] }
         end
 
@@ -366,7 +367,7 @@ module Lepus
         end
 
         def copy(row)
-          row.to_h { |name, value| [name, name.in?(JSON_ATTRIBUTES) ? JSON.parse(JSON.generate(value)) : value] }
+          row.to_h { |name, value| [name, JSON_ATTRIBUTES.include?(name) ? JSON.parse(JSON.generate(value)) : value] }
         end
       end
     end

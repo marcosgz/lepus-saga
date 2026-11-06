@@ -34,3 +34,17 @@ jobs:
           bundler-cache: true
       - name: Run tests
         run: bundle exec rspec
+
+  without-activesupport:
+    runs-on: ubuntu-latest
+    name: ruby-3.4 without activesupport
+    env:
+      BUNDLE_GEMFILE: ci/Gemfile.no_activesupport
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Run tests
+        run: bundle exec rspec

@@ -8,7 +8,7 @@ RSpec.describe Lepus::Saga::Stores::Memory do
   it_behaves_like "a lepus saga query store"
 
   it "forgets everything on clear!" do
-    execution = store.create_execution(saga_name: "s", resource_type: "R", resource_id: "1", started_at: Time.current)
+    execution = store.create_execution(saga_name: "s", resource_type: "R", resource_id: "1", started_at: Time.now.utc)
 
     store.clear!
 
@@ -16,7 +16,7 @@ RSpec.describe Lepus::Saga::Stores::Memory do
   end
 
   it "raises when locking an execution that is gone" do
-    execution = store.create_execution(saga_name: "s", resource_type: "R", resource_id: "1", started_at: Time.current)
+    execution = store.create_execution(saga_name: "s", resource_type: "R", resource_id: "1", started_at: Time.now.utc)
     store.clear!
 
     expect { store.with_lock(execution) { nil } }.to raise_error(described_class::RecordNotFound)

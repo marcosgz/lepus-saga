@@ -19,7 +19,7 @@ module Lepus
 
       # The attributes that close this attempt with `status`.
       def finish_attributes(status, context_after: {}, error: nil)
-        now = Time.current
+        now = Time.now.utc
         {
           status: status,
           finished_at: now,

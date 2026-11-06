@@ -111,13 +111,13 @@ module WebDemo
       define_method(name) do
         fail!(rejects.call(context)) if rejects && rand < 0.02
         Remote.call(name, takes: takes, flaky: flaky, outage: outage, errors: errors, key: "#{execution.id}#{name}#{execution.epoch}")
-        context["#{name}_at"] = Time.current.utc.iso8601
+        context["#{name}_at"] = Time.now.utc.iso8601
       end
       return unless compensate
 
       define_method(compensate) do
         Remote.call(compensate, takes: takes, flaky: flaky / 2, outage: 0.04, errors: errors, key: "#{execution.id}#{compensate}#{execution.epoch}")
-        context["#{compensate}_at"] = Time.current.utc.iso8601
+        context["#{compensate}_at"] = Time.now.utc.iso8601
       end
     end
   end
@@ -229,7 +229,7 @@ module WebDemo
 
     def deliver(payload, now)
       result = Lepus::Saga::Executor.new(payload).run
-      schedule(Time.current + retry_delay, [:deliver, payload]) if result == :retry
+      schedule(Time.now.utc + retry_delay, [:deliver, payload]) if result == :retry
       execution = Lepus::Saga.store.find_execution(payload[:execution_id])
       return unless execution && %w[failed compensation_failed].include?(execution.status) && rand < 0.35
 

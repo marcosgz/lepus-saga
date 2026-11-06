@@ -30,7 +30,7 @@ RSpec.describe Lepus::Saga::Web do
     end)
   end
 
-  def create_execution(status: "running", current_step: "reserve", resource_id: "order-1", created_at: Time.current, progress_at: created_at)
+  def create_execution(status: "running", current_step: "reserve", resource_id: "order-1", created_at: Time.now.utc, progress_at: created_at)
     execution = store.create_execution(
       saga_name: "orders.checkout", resource_type: "Order", resource_id: resource_id,
       current_step: current_step, started_at: created_at, last_progress_at: progress_at
@@ -39,7 +39,7 @@ RSpec.describe Lepus::Saga::Web do
       finished_at: (created_at if Lepus::Saga::ExecutionBehaviour::TERMINAL_STATUSES.include?(status)))
   end
 
-  def fail_attempt(execution, step_name, error_class, attempt: 1, at: Time.current)
+  def fail_attempt(execution, step_name, error_class, attempt: 1, at: Time.now.utc)
     record = store.create_step_attempt(execution, step_name: step_name, direction: "execute", epoch: 0, attempt: attempt, started_at: at)
     store.update_step_attempt(record, status: "failed", finished_at: at, error_class: error_class, error_message: "boom")
   end
@@ -89,8 +89,8 @@ RSpec.describe Lepus::Saga::Web do
     it "counts the stalled executions of each step by status" do
       config.stalled_after = 600
       create_execution(current_step: "charge")
-      create_execution(current_step: "charge", progress_at: 11.minutes.ago)
-      create_execution(status: "compensating", current_step: "reserve", progress_at: 1.hour.ago)
+      create_execution(current_step: "charge", progress_at: ago(minutes(11)))
+      create_execution(status: "compensating", current_step: "reserve", progress_at: ago(hours(1)))
 
       get "/api/sagas"
 
@@ -128,18 +128,18 @@ RSpec.describe Lepus::Saga::Web do
     end
 
     it "bounds when the attempt failed with error_from and error_to" do
-      retried = create_execution(created_at: 2.days.ago)
-      fail_attempt(retried, "charge", "GatewayTimeout", at: 1.hour.ago)
-      fail_attempt(create_execution(created_at: 3.days.ago), "charge", "GatewayTimeout", at: 3.days.ago)
+      retried = create_execution(created_at: ago(days(2)))
+      fail_attempt(retried, "charge", "GatewayTimeout", at: ago(hours(1)))
+      fail_attempt(create_execution(created_at: ago(days(3))), "charge", "GatewayTimeout", at: ago(days(3)))
 
-      get "/api/executions", error: "GatewayTimeout", error_step: "charge", error_from: 1.day.ago.iso8601
+      get "/api/executions", error: "GatewayTimeout", error_step: "charge", error_from: ago(days(1)).iso8601
       expect(json["executions"].map { |row| row["id"] }).to eq([retried.id])
     end
 
     it "lists stalled executions with stalled=1" do
-      stalled = create_execution(progress_at: 20.minutes.ago)
+      stalled = create_execution(progress_at: ago(minutes(20)))
       create_execution
-      create_execution(status: "failed", progress_at: 1.hour.ago)
+      create_execution(status: "failed", progress_at: ago(hours(1)))
 
       get "/api/executions", stalled: "1"
       expect(json["executions"].map { |row| row["id"] }).to eq([stalled.id])
@@ -163,10 +163,10 @@ RSpec.describe Lepus::Saga::Web do
     end
 
     it "filters by created_at" do
-      create_execution(created_at: 2.days.ago)
-      recent = create_execution(created_at: 1.hour.ago)
+      create_execution(created_at: ago(days(2)))
+      recent = create_execution(created_at: ago(hours(1)))
 
-      get "/api/executions", from: 1.day.ago.iso8601
+      get "/api/executions", from: ago(days(1)).iso8601
 
       expect(json["executions"].map { |row| row["id"] }).to eq([recent.id])
     end
@@ -185,7 +185,7 @@ RSpec.describe Lepus::Saga::Web do
     it "lists the executions moving at the busiest steps, leaving out stalled ones" do
       charging = Array.new(3) { create_execution(current_step: "charge") }
       shipping = create_execution(current_step: "ship")
-      create_execution(current_step: "ship", progress_at: 1.hour.ago)
+      create_execution(current_step: "ship", progress_at: ago(hours(1)))
       create_execution(status: "failed", current_step: "reserve")
 
       get "/api/moving", per_station: 2
@@ -212,7 +212,7 @@ RSpec.describe Lepus::Saga::Web do
     it "returns the execution with its context, attempts and other runs of the resource" do
       execution = create_execution
       other = create_execution
-      store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current)
+      store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.now.utc)
 
       get "/api/executions/#{execution.id}"
 
@@ -230,16 +230,16 @@ RSpec.describe Lepus::Saga::Web do
   end
 
   describe "insight endpoints" do
-    let(:execution) { create_execution(status: "failed", created_at: 30.minutes.ago) }
+    let(:execution) { create_execution(status: "failed", created_at: ago(minutes(30))) }
 
     before do
-      attempt = store.create_step_attempt(execution, step_name: "charge", direction: "execute", epoch: 0, attempt: 1, started_at: 20.minutes.ago)
-      store.update_step_attempt(attempt, status: "failed", finished_at: 19.minutes.ago, duration_ms: 60_000.0,
+      attempt = store.create_step_attempt(execution, step_name: "charge", direction: "execute", epoch: 0, attempt: 1, started_at: ago(minutes(20)))
+      store.update_step_attempt(attempt, status: "failed", finished_at: ago(minutes(19)), duration_ms: 60_000.0,
         error_class: "Timeout::Error", error_message: "gateway timeout")
     end
 
     it "serves the throughput series in buckets" do
-      get "/api/series", from: 1.hour.ago.iso8601, to: Time.current.iso8601
+      get "/api/series", from: ago(hours(1)).iso8601, to: Time.now.utc.iso8601
 
       expect(json["bucket"]).to eq(60)
       expect(json["rows"].sum { |row| row["started"] }).to eq(1)
@@ -254,7 +254,7 @@ RSpec.describe Lepus::Saga::Web do
       get "/api/insights/latency"
       expect(json["rows"]).to contain_exactly(include("step_name" => "charge", "p50" => 60_000.0))
 
-      stalled = create_execution(created_at: 2.hours.ago)
+      stalled = create_execution(created_at: ago(hours(2)))
       get "/api/stalled", minutes: 30
       expect(json).to include("stalled_after" => 1800)
       expect(json["executions"].map { |row| row["id"] }).to eq([stalled.id])
@@ -310,7 +310,7 @@ RSpec.describe Lepus::Saga::Web do
     it "compensates with the given reason" do
       execution = create_execution(current_step: "charge")
       store.finish_step_attempt(
-        store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current),
+        store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.now.utc),
         "succeeded"
       )
 

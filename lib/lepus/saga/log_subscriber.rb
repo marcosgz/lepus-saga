@@ -26,11 +26,17 @@ module Lepus
           execution: payload[:execution]&.id,
           resource: "#{payload[:resource_type]}/#{payload[:resource_id]}",
           **payload.slice(*ATTRIBUTES),
-          error: [payload[:error_class], payload[:error_message]].compact.join(": ").presence
+          error: error(payload)
         }.compact
 
         "#{event} #{attributes.map { |key, value| "#{key}=#{value}" }.join(" ")}"
       end
+
+      def self.error(payload)
+        message = [payload[:error_class], payload[:error_message]].compact.join(": ")
+        message unless message.empty?
+      end
+      private_class_method :error
     end
   end
 end

@@ -20,16 +20,16 @@ module Lepus
         define_method(:"#{value}?") { status == value }
       end
 
-      def terminal? = status.in?(TERMINAL_STATUSES)
+      def terminal? = TERMINAL_STATUSES.include?(status)
 
-      def in_progress? = status.in?(IN_PROGRESS_STATUSES)
+      def in_progress? = IN_PROGRESS_STATUSES.include?(status)
 
       def compensate_direction? = direction == "compensate"
 
       # The cursor moved, so the stall clock restarts and the resume budget is
       # spent fresh on the step we just reached.
       def record_progress
-        self.last_progress_at = Time.current
+        self.last_progress_at = Time.now.utc
         self.resume_count = 0
       end
 
@@ -51,7 +51,7 @@ module Lepus
       end
 
       def duration
-        (finished_at || Time.current) - started_at
+        (finished_at || Time.now.utc) - started_at
       end
     end
   end

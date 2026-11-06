@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "helpers"
+
 # The optional query contract (see Lepus::Saga::Stores::Base#queries?). The
 # including group defines `store` and starts each example with empty storage:
 #
@@ -9,9 +11,11 @@
 #     it_behaves_like "a lepus saga query store"
 #   end
 RSpec.shared_examples "a lepus saga query store" do
+  include Lepus::Saga::ExampleHelpers
+
   let(:checkout) { "query_examples.orders_checkout" }
   let(:invoice) { "query_examples.invoices_issue" }
-  let(:hour) { Time.at(Time.current.to_i.div(3600) * 3600).utc - 3.hours }
+  let(:hour) { Time.at(Time.now.utc.to_i.div(3600) * 3600).utc - hours(3) }
 
   before do
     stub_const("LepusSagaQueryCheckout", Class.new(Lepus::Saga::Definition) do
@@ -125,27 +129,27 @@ RSpec.shared_examples "a lepus saga query store" do
     end
 
     it "bounds created_at by from (inclusive) and to (exclusive)" do
-      query_execution(created_at: hour - 1.minute)
+      query_execution(created_at: hour - minutes(1))
       at_from = query_execution(created_at: hour)
-      inside = query_execution(created_at: hour + 30.minutes)
-      query_execution(created_at: hour + 1.hour)
+      inside = query_execution(created_at: hour + minutes(30))
+      query_execution(created_at: hour + hours(1))
 
-      expect(store.list_executions(from: hour, to: hour + 1.hour).map(&:id)).to contain_exactly(at_from.id, inside.id)
-      expect(store.list_executions(from: hour + 1.minute).size).to eq(2)
+      expect(store.list_executions(from: hour, to: hour + hours(1)).map(&:id)).to contain_exactly(at_from.id, inside.id)
+      expect(store.list_executions(from: hour + minutes(1)).size).to eq(2)
       expect(store.list_executions(to: hour).size).to eq(1)
     end
   end
 
   describe "progress and error filters" do
     it "bounds last_progress_at by progress_from (inclusive) and progress_to (exclusive)" do
-      query_execution(last_progress_at: hour - 1.minute)
+      query_execution(last_progress_at: hour - minutes(1))
       at_from = query_execution(last_progress_at: hour)
-      inside = query_execution(last_progress_at: hour + 30.minutes)
-      query_execution(last_progress_at: hour + 1.hour, created_at: hour - 2.hours)
+      inside = query_execution(last_progress_at: hour + minutes(30))
+      query_execution(last_progress_at: hour + hours(1), created_at: hour - hours(2))
 
-      expect(store.list_executions(progress_from: hour, progress_to: hour + 1.hour).map(&:id)).to contain_exactly(at_from.id, inside.id)
+      expect(store.list_executions(progress_from: hour, progress_to: hour + hours(1)).map(&:id)).to contain_exactly(at_from.id, inside.id)
       expect(store.list_executions(progress_to: hour).size).to eq(1)
-      expect(store.count_executions(group_by: :status, progress_from: hour + 1.minute)).to eq("running" => 2)
+      expect(store.count_executions(group_by: :status, progress_from: hour + minutes(1))).to eq("running" => 2)
     end
 
     it "keeps executions with a failed attempt of the error class and step" do
@@ -169,15 +173,15 @@ RSpec.shared_examples "a lepus saga query store" do
     end
 
     it "bounds the failed attempt's started_at by error_from (inclusive) and error_to (exclusive)" do
-      older = query_execution(created_at: hour - 1.day)
-      query_attempt(older, status: "failed", error_class: "Timeout::Error", started_at: hour + 1.hour)
+      older = query_execution(created_at: hour - days(1))
+      query_attempt(older, status: "failed", error_class: "Timeout::Error", started_at: hour + hours(1))
       early = query_execution
-      query_attempt(early, status: "failed", error_class: "Timeout::Error", started_at: hour - 1.minute)
-      query_attempt(early, attempt: 2, started_at: hour + 1.hour)
+      query_attempt(early, status: "failed", error_class: "Timeout::Error", started_at: hour - minutes(1))
+      query_attempt(early, attempt: 2, started_at: hour + hours(1))
       at_to = query_execution
-      query_attempt(at_to, status: "failed", error_class: "Timeout::Error", started_at: hour + 2.hours)
+      query_attempt(at_to, status: "failed", error_class: "Timeout::Error", started_at: hour + hours(2))
 
-      window = {error_class: "Timeout::Error", error_step: "charge", error_from: hour, error_to: hour + 2.hours}
+      window = {error_class: "Timeout::Error", error_step: "charge", error_from: hour, error_to: hour + hours(2)}
       expect(store.list_executions(**window).map(&:id)).to contain_exactly(older.id)
       expect(store.count_executions(group_by: :status, **window)).to eq("running" => 1)
       expect(store.list_executions(error_from: hour).map(&:id)).to contain_exactly(older.id, at_to.id)
@@ -225,16 +229,16 @@ RSpec.shared_examples "a lepus saga query store" do
 
   describe "#execution_series" do
     it "counts starts by created_at and terminal statuses by finished_at in aligned buckets" do
-      query_execution(created_at: hour + 5.minutes)
-      query_execution(created_at: hour + 10.minutes, status: "completed", finished_at: hour + 20.minutes)
-      query_execution(created_at: hour - 1.hour, status: "failed", finished_at: hour + 70.minutes)
-      query_execution(created_at: hour - 1.hour, status: "compensated", finished_at: hour - 1.minute)
-      query_execution(created_at: hour + 15.minutes, status: "compensating")
+      query_execution(created_at: hour + minutes(5))
+      query_execution(created_at: hour + minutes(10), status: "completed", finished_at: hour + minutes(20))
+      query_execution(created_at: hour - hours(1), status: "failed", finished_at: hour + minutes(70))
+      query_execution(created_at: hour - hours(1), status: "compensated", finished_at: hour - minutes(1))
+      query_execution(created_at: hour + minutes(15), status: "compensating")
 
-      series = store.execution_series(from: hour + 10.minutes, to: hour + 2.hours, bucket: 1.hour)
+      series = store.execution_series(from: hour + minutes(10), to: hour + hours(2), bucket: hours(1))
 
       expect(series[:truncated]).to be(false)
-      expect(series[:rows].map(&:first)).to eq([hour, hour + 1.hour])
+      expect(series[:rows].map(&:first)).to eq([hour, hour + hours(1)])
       expect(series[:rows].map(&:last)).to eq([
         {"started" => 2, "completed" => 1, "compensated" => 0, "failed" => 0, "compensation_failed" => 0},
         {"started" => 0, "completed" => 0, "compensated" => 0, "failed" => 1, "compensation_failed" => 0}
@@ -242,27 +246,27 @@ RSpec.shared_examples "a lepus saga query store" do
     end
 
     it "keeps empty buckets and filters by saga" do
-      query_execution(created_at: hour + 1.minute)
-      query_execution(saga_name: invoice, created_at: hour + 2.minutes)
+      query_execution(created_at: hour + minutes(1))
+      query_execution(saga_name: invoice, created_at: hour + minutes(2))
 
-      series = store.execution_series(from: hour, to: hour + 30.minutes, bucket: 600, saga_name: invoice)
+      series = store.execution_series(from: hour, to: hour + minutes(30), bucket: 600, saga_name: invoice)
 
-      expect(series[:rows].map(&:first)).to eq([hour, hour + 10.minutes, hour + 20.minutes])
+      expect(series[:rows].map(&:first)).to eq([hour, hour + minutes(10), hour + minutes(20)])
       expect(series[:rows].map { |_, counts| counts["started"] }).to eq([1, 0, 0])
     end
 
     it "counts at most max_rows timestamps of each kind, newest first" do
-      [1, 2, 61].each { |minute| query_execution(created_at: hour + minute.minutes) }
+      [1, 2, 61].each { |minute| query_execution(created_at: hour + minutes(minute)) }
 
-      series = store.execution_series(from: hour, to: hour + 2.hours, bucket: 1.hour, max_rows: 2)
+      series = store.execution_series(from: hour, to: hour + hours(2), bucket: hours(1), max_rows: 2)
 
       expect(series[:truncated]).to be(true)
       expect(series[:rows].map { |_, counts| counts["started"] }).to eq([1, 1])
     end
 
     it "rejects empty or too many buckets" do
-      expect { store.execution_series(from: hour, to: hour + 1.hour, bucket: 0) }.to raise_error(ArgumentError)
-      expect { store.execution_series(from: hour, to: hour + 1.day, bucket: 1) }.to raise_error(ArgumentError)
+      expect { store.execution_series(from: hour, to: hour + hours(1), bucket: 0) }.to raise_error(ArgumentError)
+      expect { store.execution_series(from: hour, to: hour + days(1), bucket: 1) }.to raise_error(ArgumentError)
     end
   end
 
@@ -273,7 +277,7 @@ RSpec.shared_examples "a lepus saga query store" do
       query_attempt(execution, step_name: "reserve", direction: "compensate", status: "failed", duration_ms: 40.0)
       query_attempt(query_execution(saga_name: invoice), step_name: "render", duration_ms: 5.0)
 
-      latency = store.step_latency(from: hour, to: hour + 1.hour)
+      latency = store.step_latency(from: hour, to: hour + hours(1))
 
       expect(latency[:truncated]).to be(false)
       expect(latency[:rows]).to eq([
@@ -288,11 +292,11 @@ RSpec.shared_examples "a lepus saga query store" do
       query_attempt(execution, attempt: 1, duration_ms: 10.0)
       query_attempt(execution, attempt: 2, status: "running", duration_ms: nil)
       query_attempt(execution, attempt: 3, status: "skipped", duration_ms: 1.0)
-      query_attempt(execution, attempt: 4, started_at: hour - 1.second, duration_ms: 500.0)
-      query_attempt(execution, attempt: 5, started_at: hour + 1.hour, duration_ms: 500.0)
+      query_attempt(execution, attempt: 4, started_at: hour - 1, duration_ms: 500.0)
+      query_attempt(execution, attempt: 5, started_at: hour + hours(1), duration_ms: 500.0)
       query_attempt(query_execution(saga_name: invoice), step_name: "render", duration_ms: 5.0)
 
-      rows = store.step_latency(from: hour, to: hour + 1.hour, saga_name: checkout)[:rows]
+      rows = store.step_latency(from: hour, to: hour + hours(1), saga_name: checkout)[:rows]
 
       expect(rows).to contain_exactly(include(step_name: "charge", count: 1, max: 10.0))
     end
@@ -300,10 +304,10 @@ RSpec.shared_examples "a lepus saga query store" do
     it "uses at most max_rows of the newest attempts" do
       execution = query_execution
       [10.0, 20.0, 30.0].each_with_index do |duration, index|
-        query_attempt(execution, attempt: index + 1, started_at: hour + index.minutes, duration_ms: duration)
+        query_attempt(execution, attempt: index + 1, started_at: hour + minutes(index), duration_ms: duration)
       end
 
-      latency = store.step_latency(from: hour, to: hour + 1.hour, max_rows: 2)
+      latency = store.step_latency(from: hour, to: hour + hours(1), max_rows: 2)
 
       expect(latency[:truncated]).to be(true)
       expect(latency[:rows]).to contain_exactly(include(count: 2, p50: 20.0, max: 30.0))
@@ -314,37 +318,37 @@ RSpec.shared_examples "a lepus saga query store" do
     it "groups failed attempts by error class, saga and step, most frequent first" do
       first = query_execution
       second = query_execution
-      query_attempt(first, attempt: 1, status: "failed", started_at: hour + 1.minute,
+      query_attempt(first, attempt: 1, status: "failed", started_at: hour + minutes(1),
         error_class: "Timeout::Error", error_message: "first timeout")
-      query_attempt(second, attempt: 1, status: "failed", started_at: hour + 3.minutes,
+      query_attempt(second, attempt: 1, status: "failed", started_at: hour + minutes(3),
         error_class: "Timeout::Error", error_message: "latest timeout")
-      query_attempt(first, attempt: 2, status: "failed", started_at: hour + 2.minutes,
+      query_attempt(first, attempt: 2, status: "failed", started_at: hour + minutes(2),
         error_class: "ArgumentError", error_message: "bad amount")
-      query_attempt(first, step_name: "ship", status: "failed", started_at: hour + 4.minutes,
+      query_attempt(first, step_name: "ship", status: "failed", started_at: hour + minutes(4),
         error_class: "Timeout::Error", error_message: "ship timeout")
-      query_attempt(first, attempt: 3, started_at: hour + 5.minutes)
+      query_attempt(first, attempt: 3, started_at: hour + minutes(5))
 
-      summary = store.failure_summary(from: hour, to: hour + 1.hour)
+      summary = store.failure_summary(from: hour, to: hour + hours(1))
 
       expect(summary.first).to include(
         error_class: "Timeout::Error", saga_name: checkout, step_name: "charge", count: 2, execution_count: 2,
         sample_message: "latest timeout", sample_execution_id: second.id
       )
-      expect(summary.first[:last_seen_at]).to be_within(0.01).of(hour + 3.minutes + 0.1)
+      expect(summary.first[:last_seen_at]).to be_within(0.01).of(hour + minutes(3) + 0.1)
       expect(summary.drop(1).map { |group| group.values_at(:error_class, :step_name, :count) })
         .to eq([["Timeout::Error", "ship", 1], ["ArgumentError", "charge", 1]])
     end
 
     it "filters by window and saga and caps the groups at limit" do
       execution = query_execution
-      query_attempt(execution, attempt: 1, status: "failed", started_at: hour - 1.minute, error_class: "OldError")
+      query_attempt(execution, attempt: 1, status: "failed", started_at: hour - minutes(1), error_class: "OldError")
       query_attempt(execution, attempt: 2, status: "failed", error_class: "KeyError")
-      query_attempt(execution, step_name: "ship", status: "failed", started_at: hour + 1.minute, error_class: "IOError")
+      query_attempt(execution, step_name: "ship", status: "failed", started_at: hour + minutes(1), error_class: "IOError")
       query_attempt(query_execution(saga_name: invoice), step_name: "render", status: "failed", error_class: "KeyError")
 
-      expect(store.failure_summary(from: hour, to: hour + 1.hour, saga_name: checkout).map { |group| group[:error_class] })
+      expect(store.failure_summary(from: hour, to: hour + hours(1), saga_name: checkout).map { |group| group[:error_class] })
         .to eq(%w[IOError KeyError])
-      expect(store.failure_summary(from: hour, to: hour + 1.hour, limit: 1).size).to eq(1)
+      expect(store.failure_summary(from: hour, to: hour + hours(1), limit: 1).size).to eq(1)
     end
 
     it "counts the distinct executions of a group" do
@@ -352,13 +356,13 @@ RSpec.shared_examples "a lepus saga query store" do
       query_attempt(execution, attempt: 1, status: "failed", error_class: "Timeout::Error")
       query_attempt(execution, attempt: 2, status: "failed", error_class: "Timeout::Error")
 
-      expect(store.failure_summary(from: hour, to: hour + 1.hour)).to contain_exactly(include(count: 2, execution_count: 1))
+      expect(store.failure_summary(from: hour, to: hour + hours(1))).to contain_exactly(include(count: 2, execution_count: 1))
     end
 
     it "is empty without failures" do
       query_attempt(query_execution)
 
-      expect(store.failure_summary(from: hour, to: hour + 1.hour)).to eq([])
+      expect(store.failure_summary(from: hour, to: hour + hours(1))).to eq([])
     end
   end
 

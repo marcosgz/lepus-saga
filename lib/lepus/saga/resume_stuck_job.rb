@@ -12,7 +12,7 @@ module Lepus
     #     schedule: every 5 minutes
     class ResumeStuckJob < ActiveJob::Base
       def perform(older_than_minutes = 15)
-        Lepus::Saga.resume_stuck(older_than: older_than_minutes.minutes)
+        Lepus::Saga.resume_stuck(older_than: older_than_minutes * 60)
       end
     end
   end

@@ -8,8 +8,8 @@ RSpec.describe Lepus::Saga::Configuration do
       exchange_name: "lepus.saga",
       max_resumes: 5,
       backlog_threshold: 100,
-      backlog_patience: 2.hours,
-      stale_running_attempt_after: 5.minutes,
+      backlog_patience: hours(2),
+      stale_running_attempt_after: minutes(5),
       store: nil
     )
   end
@@ -48,6 +48,16 @@ RSpec.describe Lepus::Saga::Configuration do
       config.store = :custom_engine
 
       expect(config.store).to be_a(Lepus::Saga::Stores::CustomEngine)
+    end
+
+    it "keeps plural store names as they are" do
+      allow(Lepus::Saga::Stores).to receive(:require).with("lepus/saga/stores/redis") do
+        stub_const("Lepus::Saga::Stores::Redis", Class.new(Lepus::Saga::Stores::Base))
+      end
+
+      config.store = :redis
+
+      expect(config.store).to be_a(Lepus::Saga::Stores::Redis)
     end
 
     it "raises for an unknown store" do
@@ -95,7 +105,7 @@ RSpec.describe Lepus::Saga::Configuration do
       Lepus::Saga.configure { |c| c.exchange_name = "app.saga" }
       execution = Lepus::Saga.store.create_execution(
         saga_name: "orders.checkout", resource_type: "Order", resource_id: "1",
-        current_step: "persist_local", partition: "organic", started_at: Time.current
+        current_step: "persist_local", partition: "organic", started_at: Time.now.utc
       )
 
       Lepus::Saga::StepProducer.publish_step(execution)

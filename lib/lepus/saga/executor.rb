@@ -30,7 +30,7 @@ module Lepus
               current_step: target.name, failure_reason: reason)
           else
             store.update_execution(execution,
-              status: "failed", failure_reason: reason, finished_at: Time.current)
+              status: "failed", failure_reason: reason, finished_at: Time.now.utc)
           end
           execution
         end
@@ -113,12 +113,12 @@ module Lepus
 
       def attempt_in_flight?
         store.running_step_attempt?(execution, **execution.current_step_scope,
-          started_since: stale_running_attempt_after.ago)
+          started_since: Time.now.utc - stale_running_attempt_after)
       end
 
       def close_abandoned_attempts
         store.stale_step_attempts(execution, **execution.current_step_scope,
-          started_before: stale_running_attempt_after.ago)
+          started_before: Time.now.utc - stale_running_attempt_after)
           .each { |stale| store.finish_step_attempt(stale, "failed", error: AbandonedAttempt.new) }
       end
 
@@ -128,7 +128,7 @@ module Lepus
           direction: execution.direction,
           epoch: execution.epoch,
           attempt: attempts_so_far + 1,
-          started_at: Time.current)
+          started_at: Time.now.utc)
         Instrumentation.saga_event("saga.step.started", execution,
           step: attempt.step_name, attempt: attempt.attempt)
       end
@@ -180,9 +180,10 @@ module Lepus
         new_context = execution.context
         new_context["completed_reason"] = reason if reason
         finished = with_fresh_lock do
+          now = Time.now.utc
           store.finish_step_attempt(attempt, "succeeded", context_after: new_context)
-          store.update_execution(execution, context: new_context, status: "completed", finished_at: Time.current,
-            last_progress_at: Time.current, resume_count: 0)
+          store.update_execution(execution, context: new_context, status: "completed", finished_at: now,
+            last_progress_at: now, resume_count: 0)
         end
         return :ack unless finished
 
@@ -230,7 +231,7 @@ module Lepus
       def apply_failure(reason)
         if execution.compensate_direction?
           store.update_execution(execution, status: "compensation_failed", failure_reason: reason,
-            finished_at: Time.current)
+            finished_at: Time.now.utc)
           :compensation_failed
         else
           self.class.begin_compensation(execution, reason: reason)
@@ -269,7 +270,7 @@ module Lepus
 
       def complete_as(status)
         execution.status = status
-        execution.finished_at = Time.current
+        execution.finished_at = Time.now.utc
         "saga.#{status}"
       end
 
