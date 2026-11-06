@@ -144,10 +144,11 @@ Adapters usually offer richer queries on their own records (`Lepus::Saga::Active
 
 `Lepus::Saga::Web` is a Rack app for the engineer on call. It has three screens:
 
-- **Map**: every saga drawn as a line of its steps. Tokens are the executions moving right now, placed along the step by how long they have spent in it against the step's median, up to three lanes per step and a "+N running" pill for the rest (static when the viewer prefers reduced motion). Each step shows its stalled executions and its failures in the selected time range (1 h, 24 h or 7 d, kept in the URL). The headline reads as the key: how many executions are moving, compensating and stalled, and how many failed. Below the map, a full-width throughput chart (with a table view), **Needs attention** (failed attempts grouped by error, saga and step, each linking to exactly the executions that hit it) and **Waiting the longest** (the stalled executions with the oldest progress).
+- **Map**: every saga drawn as a line of its steps. Tokens are the executions moving right now, placed along the step by how long they have spent in it against the step's median, up to three lanes per step and a "+N running" pill for the rest (static when the viewer prefers reduced motion). Each step shows its stalled executions and its failures in the selected time range (1 h, 24 h or 7 d, kept in the URL). The headline reads as the key: how many executions are moving, compensating and stalled, and how many failed. Below the map, a full-width throughput chart (with a table view), **Needs attention** (failed attempts grouped by error, saga and step, each linking to exactly the executions that failed that way in the range) and **Waiting the longest** (the stalled executions with the oldest progress).
 - **Executions**: a paged list filtered by status, saga, step, error, time range or stalled.
 - **Execution**: a replay of the execution along its line, its attempt history with errors and backtraces, its context and other runs of the same resource. Retry and compensate are one click plus a confirmation.
- It reads through the store's optional query methods, so the store must report `queries?` (`Stores::Memory` and `Stores::ActiveRecord` do).
+
+It reads through the store's optional query methods, so the store must report `queries?` (`Stores::Memory` and `Stores::ActiveRecord` do).
 
 ```ruby
 require "lepus/saga/web"
@@ -158,7 +159,7 @@ It has no authentication of its own: mount it behind yours. In Rails, with Devis
 ```ruby
 # config/routes.rb
 authenticate :user, ->(user) { user.admin? } do
-  mount Lepus::Saga::Web => "/sagas"
+  mount Lepus::Saga::Web => "/workflows"
 end
 ```
 
@@ -166,7 +167,7 @@ or with a route constraint:
 
 ```ruby
 constraints(->(request) { request.env["warden"].user&.admin? }) do
-  mount Lepus::Saga::Web => "/sagas"
+  mount Lepus::Saga::Web => "/workflows"
 end
 ```
 
@@ -175,8 +176,8 @@ In a plain `config.ru`:
 ```ruby
 require "lepus/saga/web"
 
-use Rack::Auth::Basic, "Sagas" do |user, password|
-  Rack::Utils.secure_compare(user, ENV.fetch("SAGAS_USER")) & Rack::Utils.secure_compare(password, ENV.fetch("SAGAS_PASSWORD"))
+use Rack::Auth::Basic, "SAGA" do |user, password|
+  Rack::Utils.secure_compare(user, ENV.fetch("LEPUS_SAGA_USER")) & Rack::Utils.secure_compare(password, ENV.fetch("LEPUS_SAGA_PASSWORD"))
 end
 run Lepus::Saga::Web
 ```
@@ -187,7 +188,7 @@ The console works under any mount path: the page's `<base href>` is the mount po
 Lepus::Saga::Web.configure do |config|
   config.authorize = ->(env, action) { action == :read || env["warden"].user&.admin? } # :read, :retry or :compensate
   config.read_only = false          # true hides retry and compensate and refuses them
-  config.title = "Sagas"
+  config.title = "SAGA"
   config.default_poll_interval = 5  # seconds: 0, 2, 5, 15 or 60
   config.max_rows = 50_000          # rows read for the throughput series and step latency
   config.stalled_after = 15 * 60    # seconds without progress before an in-progress execution counts as stalled
@@ -275,7 +276,7 @@ The query methods are optional. The engine never calls them; read-only tools suc
 | Method | Semantics |
 | --- | --- |
 | `queries?` | Whether the store implements the methods below |
-| `list_executions(saga_name:, status:, current_step:, partition:, resource:, from:, to:, progress_from:, progress_to:, error_class:, error_step:, before_id:, limit: 50)` | Executions newest first by id, `limit` of them, the page after `before_id` when given. Every filter is optional: `saga_name`, `status` and `current_step` take a value or a list, `partition` matches the column or (when it is nil) the definition's partition, `resource` is a case-insensitive substring of resource_type or resource_id, `from`/`to` bound created_at and `progress_from`/`progress_to` bound last_progress_at (inclusive/exclusive), `error_class` and `error_step` (a value or a list) keep executions with a failed attempt of that error class at that step |
+| `list_executions(saga_name:, status:, current_step:, partition:, resource:, from:, to:, progress_from:, progress_to:, error_class:, error_step:, error_from:, error_to:, before_id:, limit: 50)` | Executions newest first by id, `limit` of them, the page after `before_id` when given. Every filter is optional: `saga_name`, `status` and `current_step` take a value or a list, `partition` matches the column or (when it is nil) the definition's partition, `resource` is a case-insensitive substring of resource_type or resource_id, `from`/`to` bound created_at and `progress_from`/`progress_to` bound last_progress_at (inclusive/exclusive), `error_class` and `error_step` (a value or a list) keep executions with a failed attempt of that error class at that step, started between `error_from` and `error_to` when given |
 | `count_executions(group_by:, **filters)` | A Hash of counts keyed by `:saga_name`, `:status`, `:partition` or `:current_step`, or by arrays of values for an array such as `[:saga_name, :status]`; partition groups resolve nil to the definition's partition |
 | `execution_series(from:, to:, bucket:, saga_name: nil, max_rows:)` | `{rows: [[bucket_start, {"started" => n, "completed" => n, "compensated" => n, "failed" => n, "compensation_failed" => n}], ...], truncated:}`: starts by created_at, terminal statuses by finished_at, every bucket of the window aligned to multiples of `bucket` seconds, at most `max_rows` timestamps of each kind (the newest) |
 | `step_latency(from:, to:, saga_name: nil, max_rows:)` | `{rows: [{saga_name:, step_name:, direction:, count:, p50:, p95:, p99:, max:}, ...], truncated:}`: nearest-rank percentiles in milliseconds of succeeded and failed attempts started in the window, from the newest `max_rows` |

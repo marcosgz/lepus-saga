@@ -39,9 +39,9 @@ RSpec.describe Lepus::Saga::Web do
       finished_at: (created_at if Lepus::Saga::ExecutionBehaviour::TERMINAL_STATUSES.include?(status)))
   end
 
-  def fail_attempt(execution, step_name, error_class, attempt: 1)
-    record = store.create_step_attempt(execution, step_name: step_name, direction: "execute", epoch: 0, attempt: attempt, started_at: Time.current)
-    store.update_step_attempt(record, status: "failed", finished_at: Time.current, error_class: error_class, error_message: "boom")
+  def fail_attempt(execution, step_name, error_class, attempt: 1, at: Time.current)
+    record = store.create_step_attempt(execution, step_name: step_name, direction: "execute", epoch: 0, attempt: attempt, started_at: at)
+    store.update_step_attempt(record, status: "failed", finished_at: at, error_class: error_class, error_message: "boom")
   end
 
   def json = JSON.parse(last_response.body)
@@ -125,6 +125,15 @@ RSpec.describe Lepus::Saga::Web do
 
       get "/api/executions", error: "GatewayTimeout,CardDeclined", error_step: "charge"
       expect(json["executions"].map { |row| row["id"] }).to contain_exactly(gateway.id, declined.id)
+    end
+
+    it "bounds when the attempt failed with error_from and error_to" do
+      retried = create_execution(created_at: 2.days.ago)
+      fail_attempt(retried, "charge", "GatewayTimeout", at: 1.hour.ago)
+      fail_attempt(create_execution(created_at: 3.days.ago), "charge", "GatewayTimeout", at: 3.days.ago)
+
+      get "/api/executions", error: "GatewayTimeout", error_step: "charge", error_from: 1.day.ago.iso8601
+      expect(json["executions"].map { |row| row["id"] }).to eq([retried.id])
     end
 
     it "lists stalled executions with stalled=1" do

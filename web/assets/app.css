@@ -631,13 +631,14 @@ button, input, select { font: inherit; color: inherit; }
 .scrub input[type="range"]::-moz-range-track { height: 28px; background: none; }
 .scrub input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 4px;
+  width: 6px;
   height: 28px;
   border-radius: 2px;
   background: var(--token);
   border: 0;
+  box-shadow: 0 0 0 1.5px var(--line);
 }
-.scrub input[type="range"]::-moz-range-thumb { width: 4px; height: 28px; border-radius: 2px; background: var(--token); border: 0; }
+.scrub input[type="range"]::-moz-range-thumb { width: 6px; height: 28px; border-radius: 2px; background: var(--token); border: 0; box-shadow: 0 0 0 1.5px var(--line); }
 .scrub input[type="range"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .scrub-now { font-size: 14px; color: var(--ink-2); min-height: 21px; overflow-wrap: anywhere; }
 .scrub-now b { color: var(--ink); font-weight: 650; }
@@ -673,8 +674,21 @@ button, input, select { font: inherit; color: inherit; }
 }
 .h-row:hover { background: var(--rule-soft); }
 .h-row[aria-current="step"] { background: color-mix(in srgb, var(--token) 16%, transparent); }
-.h-row.is-future { opacity: 0.45; }
-.h-at { color: var(--ink-3); font-size: 13px; text-align: right; padding-right: 10px; padding-top: 2px; }
+.h-row.is-future .h-mark i { opacity: 0.4; }
+.h-row.is-future .h-what, .h-row.is-future .h-what b { color: var(--ink-3); font-weight: 450; }
+.h-at {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  text-align: right;
+  padding: 2px 10px 0 0;
+  cursor: pointer;
+}
+.h-at:hover { color: var(--ink); text-decoration: underline; }
+.h-at:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .h-mark { display: grid; justify-items: center; padding-top: 5px; }
 .h-mark i { width: 12px; height: 12px; border-radius: 50%; background: var(--paper); border: 2.5px solid var(--line); display: block; }
 .h-row.is-stop .h-mark i { border-color: var(--stop); background: var(--stop); border-radius: 2px; width: 6px; height: 14px; margin-top: -1px; }

@@ -167,6 +167,21 @@ RSpec.shared_examples "a lepus saga query store" do
       expect(store.count_executions(group_by: :status, error_class: "Timeout::Error")).to eq("running" => 2)
       expect(store.list_executions(error_class: "Timeout::Error", status: "failed")).to be_empty
     end
+
+    it "bounds the failed attempt's started_at by error_from (inclusive) and error_to (exclusive)" do
+      older = query_execution(created_at: hour - 1.day)
+      query_attempt(older, status: "failed", error_class: "Timeout::Error", started_at: hour + 1.hour)
+      early = query_execution
+      query_attempt(early, status: "failed", error_class: "Timeout::Error", started_at: hour - 1.minute)
+      query_attempt(early, attempt: 2, started_at: hour + 1.hour)
+      at_to = query_execution
+      query_attempt(at_to, status: "failed", error_class: "Timeout::Error", started_at: hour + 2.hours)
+
+      window = {error_class: "Timeout::Error", error_step: "charge", error_from: hour, error_to: hour + 2.hours}
+      expect(store.list_executions(**window).map(&:id)).to contain_exactly(older.id)
+      expect(store.count_executions(group_by: :status, **window)).to eq("running" => 1)
+      expect(store.list_executions(error_from: hour).map(&:id)).to contain_exactly(older.id, at_to.id)
+    end
   end
 
   describe "#count_executions" do

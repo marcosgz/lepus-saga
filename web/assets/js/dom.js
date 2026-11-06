@@ -34,6 +34,24 @@ export function clear(el) {
   return el;
 }
 
+const FOCUSABLE = "a[href], button, input, select, summary, [tabindex]";
+const focusKey = (el) => el.getAttribute("href") || `${el.tagName}|${el.textContent}`;
+
+// Replaces el's children for a poll without disturbing assistive technology:
+// unchanged content is left alone, and focus inside el moves to the matching
+// control of the new content (the same link target, or tag and text).
+export function refill(el, ...children) {
+  const next = append(document.createDocumentFragment(), children);
+  const same = next.childNodes.length === el.childNodes.length &&
+    [...next.childNodes].every((node, index) => node.isEqualNode(el.childNodes[index]));
+  if (same) return el;
+  const active = document.activeElement;
+  const key = active && active !== el && el.contains(active) ? focusKey(active) : null;
+  clear(el).append(next);
+  if (key) [...el.querySelectorAll(FOCUSABLE)].find((node) => focusKey(node) === key)?.focus({ preventScroll: true });
+  return el;
+}
+
 let toastTimer;
 export function toast(message, { error = false } = {}) {
   const el = document.getElementById("toast");

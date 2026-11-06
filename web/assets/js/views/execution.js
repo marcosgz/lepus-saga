@@ -266,8 +266,8 @@ export function execution(root, { id, me }) {
     if (frame.rail === "back") classes.push("is-back");
     if (frame.kind === "end") classes.push("is-end");
     if (frame.rail === "back" && outcome === "back") classes.push("is-ok");
-    const row = h("li", { class: classes.join(" "), tabindex: "-1" },
-      h("span", { class: "h-at" }, offset(frame.offset)),
+    const row = h("li", { class: classes.join(" ") },
+      h("button", { type: "button", class: "h-at", "aria-label": `Move the replay to ${offset(frame.offset)}` }, offset(frame.offset)),
       h("span", { class: "h-mark", "aria-hidden": "true" }, h("i")),
       h("span", { class: "h-what" }, ...describe(frame, data.execution).map((part) => (typeof part === "string" && part.includes(": ") ? part.split(": ")[0] : part))),
       h("span", { class: "h-took" }, frame.attempt && frame.attempt.duration_ms !== null ? duration(frame.attempt.duration_ms) : ""));
@@ -342,7 +342,7 @@ export function execution(root, { id, me }) {
       h("p", { class: "crumbs" }, h("a", { href: "#/executions" }, "Executions"), " / ",
         h("a", { href: `#/executions?saga=${encodeURIComponent(execution.saga_name)}` }, execution.saga_name)),
       h("div", { class: "x-head" },
-        h("h1", { class: "x-title" }, `${execution.resource_type} `, h("b", {}, execution.resource_id)),
+        h("h1", { class: "x-title", tabindex: "-1" }, `${execution.resource_type} `, h("b", {}, execution.resource_id)),
         actions()),
       h("p", { class: "x-story" }, ...story(data, frames, stallMs)),
       execution.failure_reason ? h("p", {}, h("span", { class: "x-reason" }, execution.failure_reason)) : null,
@@ -352,7 +352,7 @@ export function execution(root, { id, me }) {
       h("div", { class: "x-body" },
         h("section", { "aria-labelledby": "history-title" },
           h("h2", { class: "section-title", id: "history-title" }, "History"),
-          h("p", { class: "section-note" }, "Every attempt in order, timed from the start. Select one to move the replay there."),
+          h("p", { class: "section-note" }, "Every attempt in order, timed from the start. Select a time to move the replay there."),
           history),
         h("aside", {},
           h("h2", { class: "section-title" }, "Details"),
@@ -379,13 +379,23 @@ export function execution(root, { id, me }) {
     }
   }
 
+  // A poll waits while the reader is in the middle of something the redraw
+  // would throw away: a confirmation, the scrubber, the history or an open
+  // backtrace.
+  function interacting() {
+    const active = document.activeElement;
+    return Boolean(root.querySelector(".x-confirm, .h-trace[open]") ||
+      (active && root.contains(active) && active.closest(".x-actions, .scrub, .history")));
+  }
+
   let signature = "";
   async function load(force = false) {
     const next = await api.execution(id);
     if (destroyed) return;
     const sig = `${next.execution.status}|${next.attempts.length}|${next.execution.updated_at}`;
-    if (!force && sig === signature) return;
+    if (!force && (sig === signature || (els && interacting()))) return;
     const atEnd = frames.length && u >= frames.length - 1.001;
+    const hadFocus = force || root.contains(document.activeElement);
     signature = sig;
     data = next;
     if (!els) return render();
@@ -393,6 +403,7 @@ export function execution(root, { id, me }) {
     if (map) map.destroy();
     render();
     if (atEnd || wasPlaying) { setPlaying(false); seek(frames.length - 1); }
+    if (hadFocus) root.querySelector(".x-title").focus();
   }
 
   const stop = every(pollMs, async () => {

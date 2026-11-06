@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { h, s, clear } from "../dom.js";
+import { h, s, refill } from "../dom.js";
 import { every, pollMs } from "../live.js";
 import { sagaDefinitions } from "../sagas.js";
 import { ago, duration, statusLabel, toTime, waited } from "../format.js";
@@ -106,8 +106,7 @@ export function executions(root, { params, me }) {
 
   function draw() {
     const now = Date.now();
-    clear(body);
-    for (const execution of rows) {
+    refill(body, rows.map((execution) => {
       const href = `#/executions/${encodeURIComponent(execution.id)}`;
       const started = toTime(execution.started_at);
       const end = toTime(execution.finished_at);
@@ -120,17 +119,21 @@ export function executions(root, { params, me }) {
         h("td", { class: "r-when" }, h("time", { datetime: execution.started_at }, ago(started))),
         h("td", { class: "r-took" }, stalled ? waited(now - toTime(execution.last_progress_at)) : end ? duration(end - started) : ""));
       tr.addEventListener("click", (event) => { if (!event.target.closest("a")) location.hash = href; });
-      body.append(tr);
-    }
+      return tr;
+    }));
     status.hidden = rows.length > 0;
     status.textContent = "No executions match these filters. Try another status or saga.";
     more.hidden = !next;
   }
 
+  // With an error filter the range bounds when the attempt failed, as the
+  // counts under "Needs attention" do, rather than when the execution started.
   function query(before) {
+    const since = range ? rangeFrom(range) : null;
+    const byError = Boolean(error || errorStep);
     return {
       status: group.statuses, saga: saga || null, step: step || null, error: error || null, error_step: errorStep || null,
-      stalled: stalled ? 1 : null, from: range ? rangeFrom(range) : null, before, limit: 40
+      stalled: stalled ? 1 : null, from: byError ? null : since, error_from: byError ? since : null, before, limit: 40
     };
   }
 

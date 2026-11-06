@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { h, s, clear } from "../dom.js";
+import { h, s, clear, refill } from "../dom.js";
 import { every, pollMs } from "../live.js";
 import { LineMap } from "../map.js";
 import { rememberSagas } from "../sagas.js";
@@ -65,7 +65,7 @@ export function overview(root, { me, params }) {
   const rangeHash = () => `#/?range=${range.key}`;
   if (location.hash !== rangeHash()) history.replaceState(null, "", rangeHash());
 
-  const headline = h("h1", { class: "headline", "aria-live": "polite" }, h("span", { class: "quiet" }, "Reading the lines"));
+  const headline = h("h1", { class: "headline" }, h("span", { class: "quiet" }, "Reading the lines"));
   const rangeButtons = RANGES.map((candidate) => h("button", {
     type: "button",
     "aria-pressed": String(candidate === range),
@@ -306,7 +306,6 @@ export function overview(root, { me, params }) {
     const total = groups.reduce((sum, group) => sum + group.count, 0);
     const shown = groups.slice(0, errorsShown);
     const left = groups.length - shown.length;
-    clear(attention);
     attentionMore.href = `#/executions?status=failed&range=${range.key}`;
     attentionMore.textContent = `All ${count(failureTotal || 0)} failed executions in ${range.phrase}`;
     attentionMore.hidden = !failureTotal;
@@ -315,7 +314,7 @@ export function overview(root, { me, params }) {
     if (!groups.length) {
       attentionNote.textContent = failureTotal ? `No failed attempts recorded in ${range.phrase}.` : "";
       const wider = RANGES[RANGES.indexOf(range) + 1];
-      attention.append(h("li", { class: "empty" },
+      refill(attention, h("li", { class: "empty" },
         `Nothing failed in ${range.phrase}. `,
         wider
           ? h("button", { type: "button", class: "inline-link", onclick: () => pickRange(wider) }, `Look back over ${wider.phrase.replace("the last ", "")}`)
@@ -325,7 +324,7 @@ export function overview(root, { me, params }) {
     const kinds = groups.length === 1 ? "" : `, in ${count(groups.length)} groups by error and step, most frequent first`;
     attentionNote.textContent = `${plural(total, "failed attempt")} in ${range.phrase}${kinds}. Retries count, so one execution can fail more than once.`;
     const top = groups[0].count;
-    for (const group of shown) attention.append(errorRow(group, top));
+    refill(attention, shown.map((group) => errorRow(group, top)));
   }
 
   function renderWaiting(stalled, total) {
@@ -337,12 +336,11 @@ export function overview(root, { me, params }) {
     const more = total - shown;
     waitingMore.textContent = more > 0 ? `+${count(more)} more stalled executions` : `All ${count(total)} stalled executions`;
     waitingMore.hidden = !total;
-    clear(waiting);
     if (!stalled.length) {
-      waiting.append(h("li", { class: "empty" }, `Every execution in flight made progress in the last ${stallText}. Tokens on the map show where each one is.`));
+      refill(waiting, h("li", { class: "empty" }, `Every execution in flight made progress in the last ${stallText}. Tokens on the map show where each one is.`));
       return;
     }
-    for (const execution of stalled.slice(0, WAITING_SHOWN)) {
+    refill(waiting, stalled.slice(0, WAITING_SHOWN).map((execution) => {
       const at = toTime(execution.last_progress_at) || toTime(execution.updated_at);
       const steps = lineFor(execution.saga_name)?.steps || [];
       const index = steps.findIndex((step) => step.name === execution.current_step);
@@ -350,12 +348,12 @@ export function overview(root, { me, params }) {
       if (execution.direction === "compensate") bits.push("compensating");
       if (execution.resume_count) bits.push(`resumed ${plural(execution.resume_count, "time")}`);
       bits.push(`stuck since ${new Date(at).toDateString() === new Date(now).toDateString() ? hourMinute(at) : dayMonth(at)}`);
-      waiting.append(row(execution, {
+      return row(execution, {
         idle: true,
         side: h("span", {}, h("span", { class: "visually-hidden" }, "Waiting "), waited(now - at)),
         detail: bits.join(", ")
-      }));
-    }
+      });
+    }));
   }
 
   async function refresh() {

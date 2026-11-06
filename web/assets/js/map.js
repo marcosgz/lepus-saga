@@ -288,6 +288,7 @@ export class LineMap {
       group.addEventListener("focus", show);
       group.addEventListener("pointerleave", hide);
       group.addEventListener("blur", hide);
+      group.addEventListener("keydown", (event) => { if (event.key === "Escape") hide(); });
       this.layers.stations.append(group);
       return { group, decor, title, dot, label };
     });

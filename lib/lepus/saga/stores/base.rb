@@ -151,9 +151,11 @@ module Lepus
         # executions with `progress_to: Time.current - 15.minutes` are the
         # stalled ones). `error_class` and `error_step` take a value or a list
         # and keep executions with a failed attempt of that error class and at
-        # that step (either filter alone matches on its own attribute).
+        # that step (either filter alone matches on its own attribute);
+        # `error_from` (inclusive) and `error_to` (exclusive) bound that
+        # failed attempt's started_at, the window #failure_summary counts.
         def list_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, before_id: nil, limit: 50)
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil, before_id: nil, limit: 50)
           raise NotImplementedError
         end
 
@@ -163,7 +165,7 @@ module Lepus
         # resolves executions without one to their definition's partition
         # (nil for an unknown saga).
         def count_executions(group_by:, saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil)
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil)
           raise NotImplementedError
         end
 

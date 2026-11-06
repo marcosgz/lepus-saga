@@ -255,7 +255,9 @@ module Lepus
             from: time(request, "from"),
             to: time(request, "to"),
             error_class: list(request, "error"),
-            error_step: list(request, "error_step")
+            error_step: list(request, "error_step"),
+            error_from: time(request, "error_from"),
+            error_to: time(request, "error_to")
           }
           flag?(request, "stalled") ? stalled_filters(filters) : filters
         end

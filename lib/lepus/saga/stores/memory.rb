@@ -229,13 +229,13 @@ module Lepus
         private
 
         def matching_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
-          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil)
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, error_from: nil, error_to: nil)
           sagas = filter_values(saga_name)
           statuses = filter_values(status)
           steps = filter_values(current_step)
           partition_sagas = partition_saga_names(partition) if partition.present?
           needle = resource.to_s.downcase.presence
-          failing = failing_execution_ids(filter_values(error_class), filter_values(error_step))
+          failing = failing_execution_ids(filter_values(error_class), filter_values(error_step), error_from, error_to)
           where(@executions, Execution) do |row|
             (sagas.nil? || row[:saga_name].in?(sagas)) &&
               (statuses.nil? || row[:status].in?(statuses)) &&
@@ -250,14 +250,16 @@ module Lepus
           end
         end
 
-        def failing_execution_ids(error_classes, steps)
-          return if error_classes.nil? && steps.nil?
+        def failing_execution_ids(error_classes, steps, from, to)
+          return if [error_classes, steps, from, to].all?(&:nil?)
 
           @mutex.synchronize do
             @step_attempts.each_value.filter_map do |row|
               next unless row[:status] == "failed"
               next unless error_classes.nil? || row[:error_class].in?(error_classes)
               next unless steps.nil? || row[:step_name].in?(steps)
+              next if from && row[:started_at] < from
+              next if to && row[:started_at] >= to
 
               row[:saga_execution_id]
             end.to_set
