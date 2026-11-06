@@ -21,3 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * Changed: `Stores::Memory` indexes step attempts by execution, so attempt lookups no longer scan every attempt
 * Added: `Lepus::Saga::Web`, a mountable Rack console (overview, executions, execution, insights) over the query methods, with `authorize`, `read_only`, `title`, `default_poll_interval` and `max_rows`; `rack >= 2.2` is a dependency
 * Added: `bin/web-demo`, the console on a seeded in-memory store
+* Added: `progress_from`/`progress_to` (last_progress_at) and `error_class`/`error_step` (a failed attempt) filters on `list_executions` and `count_executions`, and `execution_count` on `failure_summary` rows
+* Changed: the web console is a live map of saga lines with moving tokens, a 1 h/24 h/7 d range, full-width throughput, "Needs attention" and "Waiting the longest", and a poll picker; insights and the Barlow/Atkinson fonts are gone in favour of Overpass
+* Added: `Web` `stalled_after` setting; `/api/sagas` counts stalled executions per step, `/api/moving` lists the moving executions of the busiest steps in one request, and `/api/executions` takes `stalled`, `error` and `error_step`
+* Added: `HEAVY=1 bin/web-demo` seeds thousands of failures, a crowded step and hundreds of stalled executions

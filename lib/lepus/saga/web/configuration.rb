@@ -23,12 +23,17 @@ module Lepus
         # Cap on the rows read for the throughput series and step latency.
         attr_accessor :max_rows
 
+        # Seconds without progress after which an in-progress execution
+        # counts as stalled.
+        attr_accessor :stalled_after
+
         def initialize
           @authorize = ->(_env, _action) { true }
           @read_only = false
           @title = "Sagas"
           @default_poll_interval = 5
           @max_rows = Stores::Base::QUERY_MAX_ROWS
+          @stalled_after = 15 * 60
         end
 
         def allowed?(env, action)

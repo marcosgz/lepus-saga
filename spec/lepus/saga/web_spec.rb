@@ -30,13 +30,18 @@ RSpec.describe Lepus::Saga::Web do
     end)
   end
 
-  def create_execution(status: "running", current_step: "reserve", resource_id: "order-1", created_at: Time.current)
+  def create_execution(status: "running", current_step: "reserve", resource_id: "order-1", created_at: Time.current, progress_at: created_at)
     execution = store.create_execution(
       saga_name: "orders.checkout", resource_type: "Order", resource_id: resource_id,
-      current_step: current_step, started_at: created_at, last_progress_at: created_at
+      current_step: current_step, started_at: created_at, last_progress_at: progress_at
     )
     store.update_execution(execution, status: status, created_at: created_at,
       finished_at: (created_at if Lepus::Saga::ExecutionBehaviour::TERMINAL_STATUSES.include?(status)))
+  end
+
+  def fail_attempt(execution, step_name, error_class, attempt: 1)
+    record = store.create_step_attempt(execution, step_name: step_name, direction: "execute", epoch: 0, attempt: attempt, started_at: Time.current)
+    store.update_step_attempt(record, status: "failed", finished_at: Time.current, error_class: error_class, error_message: "boom")
   end
 
   def json = JSON.parse(last_response.body)
@@ -55,7 +60,7 @@ RSpec.describe Lepus::Saga::Web do
       expect(last_response.status).to eq(200)
       expect(json).to include(
         "title" => "Order sagas", "read_only" => false, "queries" => true, "poll_interval" => 15,
-        "poll_intervals" => [0, 2, 5, 15, 60], "actions" => {"retry" => true, "compensate" => true}
+        "poll_intervals" => [0, 2, 5, 15, 60], "stalled_after" => 900, "actions" => {"retry" => true, "compensate" => true}
       )
     end
   end
@@ -80,6 +85,20 @@ RSpec.describe Lepus::Saga::Web do
       expect(saga["stations"]["ship"]).to include("failed" => 1)
       expect(saga["totals"]).to eq("running" => 2, "failed" => 1, "completed" => 1)
     end
+
+    it "counts the stalled executions of each step by status" do
+      config.stalled_after = 600
+      create_execution(current_step: "charge")
+      create_execution(current_step: "charge", progress_at: 11.minutes.ago)
+      create_execution(status: "compensating", current_step: "reserve", progress_at: 1.hour.ago)
+
+      get "/api/sagas"
+
+      stations = json["sagas"].find { |item| item["name"] == "orders.checkout" }["stations"]
+      expect(json["stalled_after"]).to eq(600)
+      expect(stations["charge"]).to include("running" => 2, "stalled" => {"running" => 1})
+      expect(stations["reserve"]).to include("compensating" => 1, "stalled" => {"compensating" => 1})
+    end
   end
 
   describe "GET /api/executions" do
@@ -92,6 +111,33 @@ RSpec.describe Lepus::Saga::Web do
       expect(json["executions"].map { |row| row["id"] }).to eq([running.id])
       expect(json["executions"].first).to include("partition" => "billing", "status" => "running", "current_step" => "charge")
       expect(json["next_before"]).to be_nil
+    end
+
+    it "filters by the error class and step of a failed attempt" do
+      gateway = create_execution(current_step: "ship")
+      fail_attempt(gateway, "charge", "GatewayTimeout")
+      declined = create_execution(status: "failed", current_step: "charge")
+      fail_attempt(declined, "charge", "CardDeclined")
+      fail_attempt(create_execution, "ship", "GatewayTimeout")
+
+      get "/api/executions", error: "GatewayTimeout", error_step: "charge"
+      expect(json["executions"].map { |row| row["id"] }).to eq([gateway.id])
+
+      get "/api/executions", error: "GatewayTimeout,CardDeclined", error_step: "charge"
+      expect(json["executions"].map { |row| row["id"] }).to contain_exactly(gateway.id, declined.id)
+    end
+
+    it "lists stalled executions with stalled=1" do
+      stalled = create_execution(progress_at: 20.minutes.ago)
+      create_execution
+      create_execution(status: "failed", progress_at: 1.hour.ago)
+
+      get "/api/executions", stalled: "1"
+      expect(json["executions"].map { |row| row["id"] }).to eq([stalled.id])
+
+      get "/api/executions", stalled: "1", status: "failed"
+      expect(last_response.status).to eq(400)
+      expect(json["error"]).to eq("Stalled executions are running or compensating")
     end
 
     it "pages backwards by id" do
@@ -123,6 +169,33 @@ RSpec.describe Lepus::Saga::Web do
 
       get "/api/executions", limit: "1000"
       expect(last_response.status).to eq(400)
+    end
+  end
+
+  describe "GET /api/moving" do
+    it "lists the executions moving at the busiest steps, leaving out stalled ones" do
+      charging = Array.new(3) { create_execution(current_step: "charge") }
+      shipping = create_execution(current_step: "ship")
+      create_execution(current_step: "ship", progress_at: 1.hour.ago)
+      create_execution(status: "failed", current_step: "reserve")
+
+      get "/api/moving", per_station: 2
+
+      expect(json).to include("stalled_after" => 900, "omitted" => 0)
+      expect(json["stations"].map { |station| station.values_at("saga_name", "step_name", "count") })
+        .to eq([["orders.checkout", "charge", 3], ["orders.checkout", "ship", 1]])
+      expect(json["stations"].first["executions"].map { |row| row["id"] }).to eq(charging.map(&:id).sort.last(2).reverse)
+      expect(json["stations"].last["executions"].map { |row| row["id"] }).to eq([shipping.id])
+    end
+
+    it "caps the number of steps" do
+      create_execution(current_step: "charge")
+      create_execution(current_step: "ship")
+
+      get "/api/moving", stations: 1
+
+      expect(json["stations"].size).to eq(1)
+      expect(json["omitted"]).to eq(1)
     end
   end
 
@@ -167,14 +240,19 @@ RSpec.describe Lepus::Saga::Web do
 
     it "serves failures grouped by error, latency percentiles and stalled executions" do
       get "/api/insights/failures"
-      expect(json["failures"]).to contain_exactly(include("error_class" => "Timeout::Error", "count" => 1, "sample_execution_id" => execution.id))
+      expect(json["failures"]).to contain_exactly(include("error_class" => "Timeout::Error", "count" => 1, "execution_count" => 1, "sample_execution_id" => execution.id))
 
       get "/api/insights/latency"
       expect(json["rows"]).to contain_exactly(include("step_name" => "charge", "p50" => 60_000.0))
 
       stalled = create_execution(created_at: 2.hours.ago)
       get "/api/stalled", minutes: 30
+      expect(json).to include("stalled_after" => 1800)
       expect(json["executions"].map { |row| row["id"] }).to eq([stalled.id])
+
+      config.stalled_after = 3 * 3600
+      get "/api/stalled"
+      expect(json["executions"]).to be_empty
     end
   end
 
@@ -382,7 +460,7 @@ RSpec.describe Lepus::Saga::Web do
     end
 
     it "serves the vendored fonts" do
-      get "/assets/fonts/barlow-semi-condensed/barlow-semi-condensed-600.woff2"
+      get "/assets/fonts/overpass/overpass-latin-wght.woff2"
 
       expect(last_response.status).to eq(200)
       expect(last_response.body.byteslice(0, 4)).to eq("wOF2")

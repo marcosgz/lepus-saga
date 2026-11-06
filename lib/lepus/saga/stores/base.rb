@@ -146,8 +146,14 @@ module Lepus
         # `partition` matches the partition column, and executions without one
         # whose definition runs in that partition; `resource` is a
         # case-insensitive substring of resource_type or resource_id; `from`
-        # (inclusive) and `to` (exclusive) bound created_at.
-        def list_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil, before_id: nil, limit: 50)
+        # (inclusive) and `to` (exclusive) bound created_at, `progress_from`
+        # and `progress_to` bound last_progress_at the same way (in-progress
+        # executions with `progress_to: Time.current - 15.minutes` are the
+        # stalled ones). `error_class` and `error_step` take a value or a list
+        # and keep executions with a failed attempt of that error class and at
+        # that step (either filter alone matches on its own attribute).
+        def list_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil, before_id: nil, limit: 50)
           raise NotImplementedError
         end
 
@@ -156,7 +162,8 @@ module Lepus
         # Array of values when `group_by` is an Array. Grouping by partition
         # resolves executions without one to their definition's partition
         # (nil for an unknown saga).
-        def count_executions(group_by:, saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil)
+        def count_executions(group_by:, saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil)
           raise NotImplementedError
         end
 
@@ -184,9 +191,10 @@ module Lepus
         # Failed attempts started between `from` and `to`, grouped by error
         # class, saga and step, most frequent first (then most recently seen),
         # at most `limit` groups. Returns `[{error_class:, saga_name:,
-        # step_name:, count:, last_seen_at:, sample_message:,
-        # sample_execution_id:}, ...]` where the sample is the group's latest
-        # failure.
+        # step_name:, count:, execution_count:, last_seen_at:,
+        # sample_message:, sample_execution_id:}, ...]` where count is the
+        # failed attempts, execution_count the distinct executions they belong
+        # to and the sample the group's latest failure.
         def failure_summary(from:, to:, saga_name: nil, limit: 20)
           raise NotImplementedError
         end

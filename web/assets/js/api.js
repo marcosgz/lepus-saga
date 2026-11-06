@@ -40,6 +40,7 @@ export const api = {
   sagas: (params) => request(url("sagas", params)),
   executions: (params) => request(url("executions", params)),
   execution: (id) => request(url(`executions/${encodeURIComponent(id)}`)),
+  moving: (params) => request(url("moving", params)),
   series: (params) => request(url("series", params)),
   failures: (params) => request(url("insights/failures", params)),
   latency: (params) => request(url("insights/latency", params)),

@@ -136,6 +136,39 @@ RSpec.shared_examples "a lepus saga query store" do
     end
   end
 
+  describe "progress and error filters" do
+    it "bounds last_progress_at by progress_from (inclusive) and progress_to (exclusive)" do
+      query_execution(last_progress_at: hour - 1.minute)
+      at_from = query_execution(last_progress_at: hour)
+      inside = query_execution(last_progress_at: hour + 30.minutes)
+      query_execution(last_progress_at: hour + 1.hour, created_at: hour - 2.hours)
+
+      expect(store.list_executions(progress_from: hour, progress_to: hour + 1.hour).map(&:id)).to contain_exactly(at_from.id, inside.id)
+      expect(store.list_executions(progress_to: hour).size).to eq(1)
+      expect(store.count_executions(group_by: :status, progress_from: hour + 1.minute)).to eq("running" => 2)
+    end
+
+    it "keeps executions with a failed attempt of the error class and step" do
+      timed_out = query_execution
+      query_attempt(timed_out, attempt: 1, status: "failed", error_class: "Timeout::Error")
+      query_attempt(timed_out, attempt: 2)
+      shipped = query_execution
+      query_attempt(shipped, step_name: "ship", status: "failed", error_class: "Timeout::Error")
+      rejected = query_execution(status: "failed", finished_at: hour)
+      query_attempt(rejected, status: "failed", error_class: "ArgumentError")
+      recovered = query_execution
+      query_attempt(recovered, error_class: "Timeout::Error")
+
+      expect(store.list_executions(error_class: "Timeout::Error").map(&:id)).to contain_exactly(timed_out.id, shipped.id)
+      expect(store.list_executions(error_class: "Timeout::Error", error_step: "charge").map(&:id)).to contain_exactly(timed_out.id)
+      expect(store.list_executions(error_class: %w[Timeout::Error ArgumentError], error_step: ["charge"]).map(&:id))
+        .to contain_exactly(timed_out.id, rejected.id)
+      expect(store.list_executions(error_step: "ship").map(&:id)).to contain_exactly(shipped.id)
+      expect(store.count_executions(group_by: :status, error_class: "Timeout::Error")).to eq("running" => 2)
+      expect(store.list_executions(error_class: "Timeout::Error", status: "failed")).to be_empty
+    end
+  end
+
   describe "#count_executions" do
     before do
       query_execution
@@ -279,7 +312,7 @@ RSpec.shared_examples "a lepus saga query store" do
       summary = store.failure_summary(from: hour, to: hour + 1.hour)
 
       expect(summary.first).to include(
-        error_class: "Timeout::Error", saga_name: checkout, step_name: "charge", count: 2,
+        error_class: "Timeout::Error", saga_name: checkout, step_name: "charge", count: 2, execution_count: 2,
         sample_message: "latest timeout", sample_execution_id: second.id
       )
       expect(summary.first[:last_seen_at]).to be_within(0.01).of(hour + 3.minutes + 0.1)
@@ -297,6 +330,14 @@ RSpec.shared_examples "a lepus saga query store" do
       expect(store.failure_summary(from: hour, to: hour + 1.hour, saga_name: checkout).map { |group| group[:error_class] })
         .to eq(%w[IOError KeyError])
       expect(store.failure_summary(from: hour, to: hour + 1.hour, limit: 1).size).to eq(1)
+    end
+
+    it "counts the distinct executions of a group" do
+      execution = query_execution
+      query_attempt(execution, attempt: 1, status: "failed", error_class: "Timeout::Error")
+      query_attempt(execution, attempt: 2, status: "failed", error_class: "Timeout::Error")
+
+      expect(store.failure_summary(from: hour, to: hour + 1.hour)).to contain_exactly(include(count: 2, execution_count: 1))
     end
 
     it "is empty without failures" do

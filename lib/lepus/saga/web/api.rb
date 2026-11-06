@@ -24,6 +24,7 @@ module Lepus
           ["GET", %r{\A/sagas\z}, :sagas],
           ["GET", %r{\A/executions\z}, :executions],
           ["GET", %r{\A/executions/(?<id>[^/]+)\z}, :execution],
+          ["GET", %r{\A/moving\z}, :moving],
           ["GET", %r{\A/series\z}, :series],
           ["GET", %r{\A/insights/failures\z}, :failures],
           ["GET", %r{\A/insights/latency\z}, :latency],
@@ -36,6 +37,7 @@ module Lepus
         DEFAULT_WINDOW = 24 * 3600
         SERIES_BUCKETS = [60, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200, 86_400].freeze
         SERIES_TARGET = 90
+        IN_PROGRESS = ExecutionBehaviour::IN_PROGRESS_STATUSES
         STOPPED_STATUSES = %w[failed compensation_failed].freeze
         RELATED_LIMIT = 20
 
@@ -81,13 +83,15 @@ module Lepus
             queries: store.queries?,
             poll_interval: config.default_poll_interval,
             poll_intervals: Configuration::POLL_INTERVALS,
+            stalled_after: config.stalled_after,
             actions: ACTIONS.values.to_h { |action| [action, config.allowed?(request.env, action)] }
           }
         end
 
         def sagas(request)
           from, to = window(request)
-          live = store.count_executions(group_by: %i[saga_name status current_step], status: ExecutionBehaviour::IN_PROGRESS_STATUSES)
+          live = store.count_executions(group_by: %i[saga_name status current_step], status: IN_PROGRESS)
+          stalled = store.count_executions(group_by: %i[saga_name status current_step], status: IN_PROGRESS, progress_to: stalled_before)
           stopped = store.count_executions(group_by: %i[saga_name status current_step], status: STOPPED_STATUSES, from: from, to: to)
           totals = store.count_executions(group_by: %i[saga_name status], from: from, to: to)
           failures = store.failure_summary(from: from, to: to, limit: 500)
@@ -96,17 +100,20 @@ module Lepus
 
           sagas = names.map do |name|
             Serializer.definition(name, definitions[name]).merge(
-              stations: stations(name, live.merge(stopped), failures),
+              stations: stations(name, live.merge(stopped), stalled, failures),
               totals: totals.filter_map { |(saga, status), count| [status, count] if saga == name }.to_h
             )
           end
-          {from: Serializer.time(from), to: Serializer.time(to), sagas: sagas}
+          {from: Serializer.time(from), to: Serializer.time(to), stalled_after: config.stalled_after, sagas: sagas}
         end
 
-        def stations(name, counts, failures)
-          stations = Hash.new { |hash, step| hash[step] = {attempt_failures: 0} }
+        def stations(name, counts, stalled, failures)
+          stations = Hash.new { |hash, step| hash[step] = {attempt_failures: 0, stalled: {}} }
           counts.each do |(saga, status, step), count|
             stations[step][status] = count if saga == name
+          end
+          stalled.each do |(saga, status, step), count|
+            stations[step][:stalled][status] = count if saga == name
           end
           failures.each do |failure|
             stations[failure[:step_name]][:attempt_failures] += failure[:count] if failure[:saga_name] == name
@@ -121,6 +128,22 @@ module Lepus
             executions: rows.first(limit).map { |execution| Serializer.execution(execution) },
             next_before: (rows[limit - 1].id if rows.size > limit)
           }
+        end
+
+        # Executions in progress and not stalled at the busiest steps, so a
+        # live view can draw every busy step from one request.
+        def moving(request)
+          per_station = integer(request, "per_station", default: 9, range: 1..50)
+          limit = integer(request, "stations", default: 40, range: 1..100)
+          since = stalled_before
+          counts = store.count_executions(group_by: %i[saga_name current_step], status: IN_PROGRESS, progress_from: since, saga_name: list(request, "saga"))
+            .reject { |(_saga, step), _count| step.nil? }
+          busiest = counts.sort_by { |(saga, step), count| [-count, saga, step] }.first(limit)
+          stations = busiest.map do |(saga, step), count|
+            rows = store.list_executions(saga_name: saga, current_step: step, status: IN_PROGRESS, progress_from: since, limit: per_station)
+            {saga_name: saga, step_name: step, count: count, executions: rows.map { |execution| Serializer.execution(execution) }}
+          end
+          {stalled_after: config.stalled_after, stations: stations, omitted: counts.size - busiest.size}
         end
 
         def execution(_request, id:)
@@ -161,10 +184,11 @@ module Lepus
         end
 
         def stalled(request)
-          minutes = integer(request, "minutes", default: 15, range: 1..)
+          minutes = integer(request, "minutes", default: nil, range: 1..)
+          seconds = minutes ? minutes * 60 : config.stalled_after
           limit = integer(request, "limit", default: 50, range: 1..200)
-          rows = store.stalled_executions(before: Time.current - minutes * 60).first(limit)
-          {older_than_minutes: minutes, executions: rows.map { |execution| Serializer.execution(execution) }}
+          rows = store.stalled_executions(before: Time.current - seconds).first(limit)
+          {stalled_after: seconds, executions: rows.map { |execution| Serializer.execution(execution) }}
         end
 
         def retry_execution(_request, id:)
@@ -222,16 +246,28 @@ module Lepus
         end
 
         def filters(request)
-          {
+          filters = {
             saga_name: list(request, "saga"),
             status: list(request, "status"),
             current_step: list(request, "step"),
             partition: param(request, "partition"),
             resource: param(request, "resource"),
             from: time(request, "from"),
-            to: time(request, "to")
+            to: time(request, "to"),
+            error_class: list(request, "error"),
+            error_step: list(request, "error_step")
           }
+          flag?(request, "stalled") ? stalled_filters(filters) : filters
         end
+
+        def stalled_filters(filters)
+          statuses = filters[:status] ? filters[:status] & IN_PROGRESS : IN_PROGRESS
+          raise ArgumentError, "Stalled executions are #{IN_PROGRESS.join(" or ")}" if statuses.empty?
+
+          filters.merge(status: statuses, progress_to: stalled_before)
+        end
+
+        def stalled_before = Time.current - config.stalled_after
 
         def window(request)
           to = time(request, "to") || Time.current
@@ -248,6 +284,10 @@ module Lepus
         def param(request, name)
           value = request.GET[name]
           value.is_a?(String) ? value.strip.presence : nil
+        end
+
+        def flag?(request, name)
+          %w[1 true].include?(param(request, name))
         end
 
         def list(request, name)

@@ -1,248 +1,162 @@
-import { h, replace, keepFocus } from "../dom.js";
-import { serial } from "../poller.js";
 import { api } from "../api.js";
-import { href, replaceQuery } from "../router.js";
-import { ago, fullTime, rangeWindow, shortId, shortTime, statusLabel, STATUSES } from "../format.js";
-import { signal, select, empty, failure, heading, liveDuration } from "../ui.js";
+import { h, s, clear } from "../dom.js";
+import { every, pollMs } from "../live.js";
+import { sagaDefinitions } from "../sagas.js";
+import { ago, duration, statusLabel, toTime, waited } from "../format.js";
+import { findRange, rangeFrom } from "../range.js";
 
-const PAGE = 50;
-const MAX_REFRESH = 200;
-const RANGE_OPTIONS = [
-  { value: "", label: "Any time" },
-  { value: "1h", label: "Last hour" },
-  { value: "24h", label: "Last 24 h" },
-  { value: "7d", label: "Last 7 d" }
+const GROUPS = [
+  { key: "", label: "All", statuses: null },
+  { key: "moving", label: "In flight", statuses: ["running", "compensating"] },
+  { key: "failed", label: "Failed", statuses: ["failed", "compensation_failed"] },
+  { key: "compensated", label: "Compensated", statuses: ["compensated"] },
+  { key: "completed", label: "Completed", statuses: ["completed"] }
 ];
 
-function readFilters(query) {
-  return {
-    saga: query.saga || "",
-    status: (query.status || "").split(",").filter(Boolean),
-    step: query.step || "",
-    partition: query.partition || "",
-    resource: query.resource || "",
-    range: query.range || ""
-  };
+// A line the width of a table cell: done stops in ink, the rest pale, and a
+// mark where the execution is.
+function glyph(execution, definition) {
+  const steps = definition ? definition.steps : [];
+  const n = Math.max(1, steps.length);
+  const width = 112;
+  const x = (i) => 6 + (n === 1 ? 50 : ((width - 12) * i) / (n - 1));
+  const at = Math.max(0, steps.findIndex((step) => step.name === execution.current_step));
+  const done = execution.status === "completed" ? n - 1 : execution.status === "compensated" ? -1 : at;
+  const svg = s("svg", { class: "glyph", viewBox: `0 0 ${width} 16`, width, height: 16, "aria-hidden": "true" });
+  svg.append(s("line", { class: "g-line is-future", x1: x(0), x2: x(n - 1), y1: 8, y2: 8 }));
+  if (done > 0) svg.append(s("line", { class: "g-line", x1: x(0), x2: x(done), y1: 8, y2: 8 }));
+  for (let i = 0; i < n; i++) {
+    svg.append(s("circle", { class: i <= done ? "g-dot" : "g-dot is-future", cx: x(i), cy: 8, r: 3 }));
+  }
+  const status = execution.status;
+  if (status === "failed" || status === "compensation_failed") {
+    svg.append(s("rect", { class: "g-stop", x: x(at) - 2, y: 0, width: 4, height: 16, rx: 1.5 }));
+  } else if (status === "running") {
+    svg.append(s("rect", { class: "t-token", x: x(at) - 7, y: 3.5, width: 14, height: 9, rx: 4.5 }));
+  } else if (status === "compensating" || status === "compensated") {
+    svg.append(s("rect", { class: "t-token is-back", x: x(status === "compensated" ? 0 : at) - 7, y: 3.5, width: 14, height: 9, rx: 4.5 }));
+  } else if (status === "completed") {
+    svg.append(s("rect", { class: "t-token is-done", x: x(n - 1) - 7, y: 3.5, width: 14, height: 9, rx: 4.5 }));
+  }
+  return svg;
 }
 
-export function executions(root, { route, navigate }) {
-  const filters = readFilters(route.query);
+const shortError = (name) => name.split("::").pop();
+
+export function executions(root, { params, me }) {
+  const stalled = params.get("stalled") === "1";
+  const stallText = duration((me.stalled_after || 900) * 1000);
+  const range = stalled ? null : findRange(params.get("range"));
+  const group = stalled ? GROUPS[1] : GROUPS.find((candidate) => candidate.key === (params.get("status") || "")) || GROUPS[0];
+  const saga = params.get("saga") || "";
+  const step = params.get("step") || "";
+  const error = params.get("error") || "";
+  const errorStep = params.get("error_step") || "";
+  let destroyed = false;
   let rows = [];
-  let nextBefore = null;
-  let seen = new Map();
-  let loaded = false;
-  let generation = 0;
-  let snapshot = null;
-  const queue = serial();
+  let next = null;
+  let extended = false;
+
+  const go = (changes) => {
+    const query = new URLSearchParams({
+      status: stalled ? "" : group.key, saga, step, error, error_step: errorStep,
+      range: range ? range.key : "", stalled: stalled ? "1" : "", ...changes
+    });
+    for (const [key, value] of [...query]) if (!value) query.delete(key);
+    location.hash = `#/executions${query.toString() ? `?${query}` : ""}`;
+  };
+
+  const seg = h("div", { class: "seg", role: "group", "aria-label": "Status" },
+    GROUPS.map((candidate) => h("button", {
+      type: "button", "aria-pressed": String(candidate === group), onclick: () => go({ status: candidate.key, stalled: "" })
+    }, candidate.label)));
+  const select = h("select", { class: "select", "aria-label": "Saga" }, h("option", { value: "" }, "Every saga"));
+  select.addEventListener("change", () => go({ saga: select.value, step: "" }));
+  const chip = step ? h("button", { type: "button", class: "chip", onclick: () => go({ step: "" }), "aria-label": `Stop filtering by ${step}` },
+    "at ", h("b", {}, step), h("span", { "aria-hidden": "true" }, "×")) : null;
+  const rangeChip = range ? h("button", { type: "button", class: "chip", onclick: () => go({ range: "" }), "aria-label": `Stop limiting to ${range.phrase}` },
+    "in ", h("b", {}, range.phrase.replace("the ", "")), h("span", { "aria-hidden": "true" }, "×")) : null;
+  const stalledChip = stalled ? h("button", { type: "button", class: "chip", onclick: () => go({ stalled: "", status: "moving" }), "aria-label": "Show every execution in flight" },
+    h("b", {}, `no progress for ${stallText}+`), h("span", { "aria-hidden": "true" }, "×")) : null;
+  const errorLabel = [error && shortError(error), errorStep && `at ${errorStep}`].filter(Boolean).join(" ");
+  const errorChip = error || errorStep ? h("button", { type: "button", class: "chip", onclick: () => go({ error: "", error_step: "" }), "aria-label": `Stop filtering by ${errorLabel}`, title: error || null },
+    "failed with ", h("b", {}, errorLabel), h("span", { "aria-hidden": "true" }, "×")) : null;
 
   const body = h("tbody");
-  const results = h("div", { class: "results" });
-  const more = h("div", { class: "more" });
-  const sheet = h("div", { class: "filters", id: "filters" });
-  const sheetToggle = h("button", { type: "button", class: "button filters-toggle", "aria-controls": "filters", "aria-expanded": "false" });
-  sheetToggle.addEventListener("click", () => toggleSheet());
-  sheet.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && sheet.classList.contains("open")) {
-      event.stopPropagation();
-      toggleSheet(false);
+  const table = h("table", { class: "rows" },
+    h("thead", {}, h("tr", {},
+      h("th", { class: "r-glyph", scope: "col" }, h("span", { class: "visually-hidden" }, "Position on the line")),
+      h("th", { scope: "col" }, "Resource"),
+      h("th", { class: "r-saga-col", scope: "col" }, "Saga"),
+      h("th", { scope: "col" }, "Step"),
+      h("th", { scope: "col" }, "Status"),
+      h("th", { scope: "col" }, "Started"),
+      h("th", { scope: "col" }, stalled ? "Waiting" : "Took"))),
+    body);
+  const more = h("button", { type: "button", class: "btn btn-quiet", hidden: true }, "Show older");
+  const status = h("p", { class: "empty", hidden: true });
+
+  root.append(
+    h("div", { class: "list-head" },
+      h("h1", { class: "list-title" }, saga ? saga : stalled ? "Stalled executions" : "Executions"),
+      h("div", { class: "filters" }, seg, select, chip, errorChip, rangeChip, stalledChip)),
+    table, status, h("div", { class: "more-row" }, more));
+
+  let definitions = new Map();
+
+  function draw() {
+    const now = Date.now();
+    clear(body);
+    for (const execution of rows) {
+      const href = `#/executions/${encodeURIComponent(execution.id)}`;
+      const started = toTime(execution.started_at);
+      const end = toTime(execution.finished_at);
+      const tr = h("tr", {},
+        h("td", { class: "r-glyph" }, glyph(execution, definitions.get(execution.saga_name))),
+        h("td", { class: "r-res" }, h("a", { href }, `${execution.resource_type} ${execution.resource_id}`)),
+        h("td", { class: "r-saga-col" }, execution.saga_name),
+        h("td", { class: "r-step" }, execution.current_step || ""),
+        h("td", { class: "r-state" }, h("span", { class: `state state-${execution.status}` }, statusLabel(execution.status))),
+        h("td", { class: "r-when" }, h("time", { datetime: execution.started_at }, ago(started))),
+        h("td", { class: "r-took" }, stalled ? waited(now - toTime(execution.last_progress_at)) : end ? duration(end - started) : ""));
+      tr.addEventListener("click", (event) => { if (!event.target.closest("a")) location.hash = href; });
+      body.append(tr);
     }
-  });
-
-  replace(root,
-    heading("Executions", sheetToggle),
-    sheet,
-    results,
-    more);
-
-  api.sagas({}).then((data) => buildFilters(data.sagas)).catch(() => buildFilters([]));
-
-  function activeCount() {
-    return [filters.saga, filters.step, filters.partition, filters.resource, filters.range].filter(Boolean).length + (filters.status.length ? 1 : 0);
+    status.hidden = rows.length > 0;
+    status.textContent = "No executions match these filters. Try another status or saga.";
+    more.hidden = !next;
   }
 
-  function toggleSheet(open = !sheet.classList.contains("open")) {
-    const wasOpen = sheet.classList.contains("open");
-    sheet.classList.toggle("open", open);
-    sheetToggle.setAttribute("aria-expanded", String(open));
-    if (open) sheet.querySelector("select, input, button")?.focus();
-    else if (wasOpen) sheetToggle.focus();
-  }
-
-  function buildFilters(sagas) {
-    const partitions = [...new Set(sagas.map((saga) => saga.partition).filter(Boolean))].sort();
-    const statusGroup = h("div", { class: "chips", role: "group", "aria-label": "Status" },
-      STATUSES.map((status) => {
-        const button = h("button", { type: "button", class: "chip-toggle", "aria-pressed": String(filters.status.includes(status)) }, signal(status));
-        button.addEventListener("click", () => {
-          filters.status = filters.status.includes(status) ? filters.status.filter((item) => item !== status) : [...filters.status, status];
-          button.setAttribute("aria-pressed", String(filters.status.includes(status)));
-          changed();
-        });
-        return button;
-      }));
-    const search = h("input", { type: "search", class: "input", placeholder: "Resource type or id", value: filters.resource, "aria-label": "Search resource" });
-    let debounce;
-    search.addEventListener("input", () => {
-      clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        filters.resource = search.value.trim();
-        changed();
-      }, 300);
-    });
-
-    replace(sheet,
-      h("div", { class: "filters-row" },
-        field("Saga", select({ label: "Saga", value: filters.saga, options: [{ value: "", label: "All sagas" }, ...sagas.map((saga) => ({ value: saga.name, label: saga.name }))], onChange: (value) => set("saga", value) })),
-        field("Partition", select({ label: "Partition", value: filters.partition, options: [{ value: "", label: "Any partition" }, ...partitions.map((name) => ({ value: name, label: name }))], onChange: (value) => set("partition", value) })),
-        field("Started", select({ label: "Started", value: filters.range, options: RANGE_OPTIONS, onChange: (value) => set("range", value) })),
-        field("Resource", search)),
-      h("div", { class: "filters-row" },
-        statusGroup,
-        filters.step ? h("button", { type: "button", class: "chip chip-removable", "aria-label": `Remove step filter ${filters.step}`, onclick: removeStep }, `Step ${filters.step}`, h("span", { "aria-hidden": "true" }, " ×")) : null,
-        activeCount() ? h("button", { type: "button", class: "button button-quiet", onclick: clearAll }, "Clear filters") : null,
-        h("button", { type: "button", class: "button sheet-done", onclick: () => toggleSheet(false) }, "Show results")));
-    sheetToggle.textContent = activeCount() ? `Filters (${activeCount()})` : "Filters";
-  }
-
-  function field(label, control) {
-    return h("label", { class: "field" }, h("span", { class: "field-label" }, label), control);
-  }
-
-  function set(key, value) {
-    filters[key] = value;
-    changed();
-  }
-
-  function clearAll() {
-    navigate(href("/executions"));
-  }
-
-  function removeStep() {
-    navigate(href("/executions", { ...filters, step: "" }));
-  }
-
-  function changed() {
-    replaceQuery("/executions", filters);
-    sheetToggle.textContent = activeCount() ? `Filters (${activeCount()})` : "Filters";
-    generation += 1;
-    snapshot = null;
-    rows = [];
-    nextBefore = null;
-    seen = new Map();
-    loaded = false;
-    refresh().catch(() => null);
-  }
-
-  function params(extra) {
+  function query(before) {
     return {
-      saga: filters.saga,
-      status: filters.status,
-      step: filters.step,
-      partition: filters.partition,
-      resource: filters.resource,
-      ...rangeWindow(filters.range),
-      ...extra
+      status: group.statuses, saga: saga || null, step: step || null, error: error || null, error_step: errorStep || null,
+      stalled: stalled ? 1 : null, from: range ? rangeFrom(range) : null, before, limit: 40
     };
   }
 
-  function refresh() {
-    return queue(load);
-  }
-
-  async function load() {
-    const ticket = generation;
-    const limit = Math.min(MAX_REFRESH, Math.max(PAGE, rows.length));
-    try {
-      const data = await api.executions(params({ limit }));
-      if (ticket !== generation) return;
-      const next = JSON.stringify(data);
-      if (next === snapshot) return;
-      snapshot = next;
-      if (rows.length > MAX_REFRESH && data.executions.length) {
-        const oldest = data.executions[data.executions.length - 1].id;
-        rows = [...data.executions, ...rows.filter((row) => row.id < oldest)];
-      } else {
-        rows = data.executions;
-        nextBefore = data.next_before;
-      }
-      render();
-    } catch (error) {
-      if (ticket === generation) {
-        snapshot = null;
-        replace(results, failure(error));
-      }
-      throw error;
+  async function refresh() {
+    if (extended) return;
+    const [defs, data] = await Promise.all([sagaDefinitions(), api.executions(query())]);
+    if (destroyed) return;
+    definitions = defs;
+    if (select.options.length === 1) {
+      for (const name of defs.keys()) select.append(h("option", { value: name, selected: name === saga }, name));
     }
+    rows = data.executions;
+    next = data.next_before;
+    draw();
   }
 
-  function loadOlder(button) {
-    button.disabled = true;
-    queue(async () => {
-      const ticket = generation;
-      if (!nextBefore) return;
-      try {
-        const data = await api.executions(params({ limit: PAGE, before: nextBefore }));
-        if (ticket !== generation) return;
-        rows = [...rows, ...data.executions];
-        nextBefore = data.next_before;
-        snapshot = null;
-        render();
-      } catch (error) {
-        if (ticket === generation) replace(more, failure(error));
-      }
-    });
-  }
+  more.addEventListener("click", async () => {
+    more.disabled = true;
+    const data = await api.executions(query(next));
+    extended = true;
+    rows = rows.concat(data.executions);
+    next = data.next_before;
+    more.disabled = false;
+    draw();
+  });
 
-  function render() {
-    const changedIds = new Set(rows.filter((row) => loaded && seen.get(row.id) !== row.status).map((row) => row.id));
-    seen = new Map(rows.map((row) => [row.id, row.status]));
-    loaded = true;
-    if (!rows.length) {
-      replace(results, empty("No executions match these filters."));
-      replace(more);
-      return;
-    }
-    keepFocus(root, () => {
-      replace(body, rows.map((row) => tableRow(row, changedIds.has(row.id))));
-      drawTable();
-    });
-  }
-
-  function drawTable() {
-    replace(results, h("table", { class: "table executions-table" },
-      h("caption", { class: "visually-hidden" }, "Executions, newest first"),
-      h("thead", {}, h("tr", {},
-        h("th", { scope: "col" }, "Status"),
-        h("th", { scope: "col" }, "Saga"),
-        h("th", { scope: "col" }, "Resource"),
-        h("th", { scope: "col", class: "col-step" }, "Step"),
-        h("th", { scope: "col", class: "col-partition" }, "Partition"),
-        h("th", { scope: "col", class: "col-started" }, "Started"),
-        h("th", { scope: "col", class: "col-duration num" }, "Duration"),
-        h("th", { scope: "col", class: "col-id" }, "Id"))),
-      body));
-    replace(more, nextBefore ? h("button", { type: "button", class: "button", dataset: { key: "load-older" }, onclick: (event) => loadOlder(event.currentTarget) }, "Load older") : h("p", { class: "muted" }, `${rows.length} shown, that is all of them.`));
-  }
-
-  function tableRow(row, flash) {
-    const link = href(`/executions/${encodeURIComponent(row.id)}`);
-    const node = h("tr", { class: ["row-link", flash ? "flash" : null] },
-      h("td", { class: "col-status" }, signal(row.status)),
-      h("td", { class: "col-saga" }, h("a", { href: link, class: "saga-name", dataset: { key: `row:${row.id}` } }, row.saga_name)),
-      h("td", { class: "col-resource" }, h("span", { class: "muted" }, row.resource_type), " ", row.resource_id),
-      h("td", { class: "col-step" }, row.direction === "compensate" ? `↩ ${row.current_step || ""}` : row.current_step || ""),
-      h("td", { class: "col-partition" }, row.partition || ""),
-      h("td", { class: "col-started" }, h("time", { datetime: row.started_at || row.created_at, title: fullTime(row.started_at || row.created_at) }, shortTime(row.started_at || row.created_at))),
-      h("td", { class: "col-duration num" }, liveDuration(row)),
-      h("td", { class: "col-id" }, h("span", { title: row.id }, shortId(row.id))),
-      h("td", { class: "col-age", "aria-hidden": "true" }, ago(row.started_at || row.created_at)));
-    node.addEventListener("click", (event) => {
-      if (event.target.closest("a, button") || window.getSelection()?.toString()) return;
-      navigate(link);
-    });
-    node.title = `${row.saga_name}: ${statusLabel(row.status).toLowerCase()}`;
-    return node;
-  }
-
-  return { refresh, destroy() {} };
+  const stop = every(pollMs, refresh);
+  return { destroy() { destroyed = true; stop(); } };
 }

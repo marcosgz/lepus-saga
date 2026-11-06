@@ -228,20 +228,39 @@ module Lepus
 
         private
 
-        def matching_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil)
+        def matching_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil,
+          progress_from: nil, progress_to: nil, error_class: nil, error_step: nil)
           sagas = filter_values(saga_name)
           statuses = filter_values(status)
           steps = filter_values(current_step)
           partition_sagas = partition_saga_names(partition) if partition.present?
           needle = resource.to_s.downcase.presence
+          failing = failing_execution_ids(filter_values(error_class), filter_values(error_step))
           where(@executions, Execution) do |row|
             (sagas.nil? || row[:saga_name].in?(sagas)) &&
               (statuses.nil? || row[:status].in?(statuses)) &&
               (steps.nil? || row[:current_step].in?(steps)) &&
               (from.nil? || row[:created_at] >= from) &&
               (to.nil? || row[:created_at] < to) &&
+              (progress_from.nil? || row[:last_progress_at] >= progress_from) &&
+              (progress_to.nil? || row[:last_progress_at] < progress_to) &&
+              (failing.nil? || failing.include?(row[:id])) &&
               (partition_sagas.nil? || in_partition?(row, partition.to_s, partition_sagas)) &&
               (needle.nil? || row.values_at(:resource_type, :resource_id).any? { |value| value.to_s.downcase.include?(needle) })
+          end
+        end
+
+        def failing_execution_ids(error_classes, steps)
+          return if error_classes.nil? && steps.nil?
+
+          @mutex.synchronize do
+            @step_attempts.each_value.filter_map do |row|
+              next unless row[:status] == "failed"
+              next unless error_classes.nil? || row[:error_class].in?(error_classes)
+              next unless steps.nil? || row[:step_name].in?(steps)
+
+              row[:saga_execution_id]
+            end.to_set
           end
         end
 
@@ -262,7 +281,7 @@ module Lepus
           latest = attempts.max_by { |attempt| [attempt.finished_at, attempt.id] }
           {
             error_class: error_class, saga_name: saga_name, step_name: step_name, count: attempts.size,
-            last_seen_at: latest.finished_at, sample_message: latest.error_message,
+            execution_count: attempts.map(&:saga_execution_id).uniq.size, last_seen_at: latest.finished_at, sample_message: latest.error_message,
             sample_execution_id: latest.saga_execution_id
           }
         end
