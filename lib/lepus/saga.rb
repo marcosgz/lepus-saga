@@ -67,6 +67,13 @@ module Lepus
         registry[name.to_s] = klass
       end
 
+      # Every registered definition by saga name, after eager loading the
+      # application so none is missing.
+      def definitions
+        eager_load_definitions!
+        registry
+      end
+
       def find_definition!(name)
         registry.fetch(name.to_s) do
           eager_load_definitions!

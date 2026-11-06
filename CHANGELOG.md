@@ -13,3 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 * Added: `require "lepus/saga/rspec"` with the "a lepus saga store" and "a lepus saga engine" shared examples
 * Added: `Lepus::Saga::ResumeStuckJob` ActiveJob for scheduling `Lepus::Saga.resume_stuck`
 * Changed: `resume_stuck` increments `resume_count` atomically instead of writing back the value it read
+* Added: optional query methods on `Stores::Base` (`queries?`, `list_executions`, `count_executions`, `execution_series`, `step_latency`, `failure_summary`, `saga_names`), implemented by `Stores::Memory`
+* Added: the "a lepus saga query store" shared examples in `lepus/saga/rspec`
+* Added: `Lepus::Saga.definitions`, the registry after eager loading the application
+* Added: `current_step` filter on `list_executions` and `count_executions`
+* Changed: `Stores::Memory` indexes step attempts by execution, so attempt lookups no longer scan every attempt
+* Added: `Lepus::Saga::Web`, a mountable Rack console (overview, executions, execution, insights) over the query methods, with `authorize`, `read_only`, `title`, `default_poll_interval` and `max_rows`; `rack >= 2.2` is a dependency
+* Added: `bin/web-demo`, the console on a seeded in-memory store

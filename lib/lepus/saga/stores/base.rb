@@ -20,7 +20,19 @@ module Lepus
       #
       # `require "lepus/saga/rspec"` and `it_behaves_like "a lepus saga store"`
       # verify an adapter against this contract.
+      #
+      # The query methods after #step_succeeded? are optional: they feed
+      # read-only tools such as dashboards and are never called by the engine.
+      # An adapter that implements them returns true from #queries? and runs
+      # `it_behaves_like "a lepus saga query store"`.
       class Base
+        QUERY_MAX_ROWS = 50_000
+        MAX_SERIES_BUCKETS = 1_000
+        GROUPABLE = %i[saga_name status partition current_step].freeze
+        SERIES_KEYS = ["started", *ExecutionBehaviour::TERMINAL_STATUSES].freeze
+        LATENCY_STATUSES = %w[succeeded failed].freeze
+        PERCENTILES = {p50: 50, p95: 95, p99: 99}.freeze
+
         # Inserts an execution and returns its record. `attributes` holds
         # saga_name, resource_type, resource_id, current_step, context,
         # correlation_id, partition, started_at and last_progress_at. The store
@@ -124,6 +136,66 @@ module Lepus
           raise NotImplementedError
         end
 
+        # Whether the optional query methods below are implemented.
+        def queries? = false
+
+        # Executions matching the filters, newest first by id (UUIDv7, so by
+        # creation time), at most `limit` of them. `before_id` returns the
+        # page after the execution with that id. Every filter is optional:
+        # `saga_name`, `status` and `current_step` take a value or a list;
+        # `partition` matches the partition column, and executions without one
+        # whose definition runs in that partition; `resource` is a
+        # case-insensitive substring of resource_type or resource_id; `from`
+        # (inclusive) and `to` (exclusive) bound created_at.
+        def list_executions(saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil, before_id: nil, limit: 50)
+          raise NotImplementedError
+        end
+
+        # Number of executions matching the #list_executions filters, as a
+        # Hash keyed by the value of `group_by` (one of GROUPABLE), or by an
+        # Array of values when `group_by` is an Array. Grouping by partition
+        # resolves executions without one to their definition's partition
+        # (nil for an unknown saga).
+        def count_executions(group_by:, saga_name: nil, status: nil, current_step: nil, partition: nil, resource: nil, from: nil, to: nil)
+          raise NotImplementedError
+        end
+
+        # Executions started (by created_at) and finished in each terminal
+        # status (by finished_at) per `bucket` seconds between `from` and
+        # `to`. Returns `{rows: [[bucket_start, {"started" => n, "completed" =>
+        # n, ...}], ...], truncated:}` with every bucket of the window, bucket
+        # starts aligned to multiples of `bucket` since the epoch. At most
+        # `max_rows` of the newest timestamps of each kind are counted;
+        # `truncated` tells whether some were left out.
+        def execution_series(from:, to:, bucket:, saga_name: nil, max_rows: QUERY_MAX_ROWS)
+          raise NotImplementedError
+        end
+
+        # Duration percentiles (nearest rank, in milliseconds) of the
+        # succeeded and failed attempts started between `from` and `to`, per
+        # saga, step and direction. Returns `{rows: [{saga_name:, step_name:,
+        # direction:, count:, p50:, p95:, p99:, max:}, ...], truncated:}`
+        # sorted by saga, step and direction, computed from at most `max_rows`
+        # of the newest attempts.
+        def step_latency(from:, to:, saga_name: nil, max_rows: QUERY_MAX_ROWS)
+          raise NotImplementedError
+        end
+
+        # Failed attempts started between `from` and `to`, grouped by error
+        # class, saga and step, most frequent first (then most recently seen),
+        # at most `limit` groups. Returns `[{error_class:, saga_name:,
+        # step_name:, count:, last_seen_at:, sample_message:,
+        # sample_execution_id:}, ...]` where the sample is the group's latest
+        # failure.
+        def failure_summary(from:, to:, saga_name: nil, limit: 20)
+          raise NotImplementedError
+        end
+
+        # The distinct saga names in storage, sorted.
+        def saga_names
+          raise NotImplementedError
+        end
+
         def update_execution(execution, attributes)
           assign(execution, attributes)
           save_execution(execution)
@@ -142,6 +214,79 @@ module Lepus
 
         def assign(record, attributes)
           attributes.each { |name, value| record.public_send(:"#{name}=", value) }
+        end
+
+        def filter_values(value)
+          Array(value).map(&:to_s).presence
+        end
+
+        def partition_saga_names(partition)
+          Lepus::Saga.definitions.filter_map { |name, definition| name if definition.partition == partition.to_s }
+        end
+
+        def resolve_partition(partition, saga_name)
+          partition || Lepus::Saga.definitions[saga_name]&.partition
+        end
+
+        def group_keys(group_by)
+          keys = Array(group_by).map(&:to_sym)
+          unknown = keys - GROUPABLE
+          raise ArgumentError, "Cannot group executions by #{unknown.join(", ")}" if keys.empty? || unknown.any?
+
+          keys
+        end
+
+        # Sums `[attributes, count]` rows into the #count_executions Hash.
+        def tally_groups(rows, group_by)
+          keys = group_keys(group_by)
+          rows.each_with_object(Hash.new(0)) do |(attributes, count), counts|
+            values = keys.map do |key|
+              (key == :partition) ? resolve_partition(attributes[:partition], attributes[:saga_name]) : attributes[key]
+            end
+            counts[group_by.is_a?(Array) ? values : values.first] += count
+          end
+        end
+
+        # `rows` holds up to max_rows + 1 entries, newest first.
+        def take_rows(rows, max_rows)
+          [rows.first(max_rows), rows.size > max_rows]
+        end
+
+        def series_bucket(from, to, bucket)
+          seconds = bucket.to_i
+          raise ArgumentError, "bucket must be at least one second" unless seconds.positive?
+          if series_size(from, to, seconds) > MAX_SERIES_BUCKETS
+            raise ArgumentError, "More than #{MAX_SERIES_BUCKETS} buckets between #{from} and #{to}"
+          end
+
+          seconds
+        end
+
+        def series_size(from, to, seconds)
+          ((to.to_r - from.to_i.div(seconds) * seconds) / seconds).ceil
+        end
+
+        # Buckets `started` timestamps and `[finished_at, status]` pairs.
+        def build_series(from, to, seconds, started, finished)
+          first = from.to_i.div(seconds) * seconds
+          rows = Array.new(series_size(from, to, seconds)) do |index|
+            [Time.at(first + index * seconds).utc, SERIES_KEYS.index_with(0)]
+          end
+          started.each { |time| rows[(time.to_i - first).div(seconds)].last["started"] += 1 }
+          finished.each { |time, status| rows[(time.to_i - first).div(seconds)].last[status] += 1 }
+          rows
+        end
+
+        # Percentiles of `[saga_name, step_name, direction, duration_ms]` samples.
+        def latency_rows(samples)
+          samples.group_by { |sample| sample.first(3) }.sort_by(&:first).map do |(saga_name, step_name, direction), group|
+            durations = group.map { |sample| sample.last.to_f }.sort
+            {
+              saga_name: saga_name, step_name: step_name, direction: direction, count: durations.size,
+              **PERCENTILES.transform_values { |rank| durations[(Rational(rank, 100) * durations.size).ceil - 1] },
+              max: durations.last
+            }
+          end
         end
       end
     end

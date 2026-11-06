@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <base href="{{base}}">
+  <title>{{title}}</title>
+  <link rel="preload" href="{{assets}}/fonts/atkinson-hyperlegible/atkinson-hyperlegible-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{assets}}/fonts/barlow-semi-condensed/barlow-semi-condensed-600.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="icon" href="{{assets}}/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{assets}}/app.css">
+  <script src="{{assets}}/js/theme.js"></script>
+  <script type="module" src="{{assets}}/js/main.js"></script>
+</head>
+<body>
+  <a class="skip" href="#view">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path class="brand-rail" d="M2 17h20"/>
+        <path class="brand-post" d="M7 17V5"/>
+        <rect class="brand-arm" x="7" y="4" width="11" height="4" rx="1"/>
+        <circle class="brand-lamp" cx="7" cy="17" r="2.5"/>
+        <circle class="brand-lamp" cx="17" cy="17" r="2.5"/>
+      </svg>
+      <span id="brand-title">{{title}}</span>
+    </a>
+    <nav class="views" aria-label="Views">
+      <a href="#/" data-nav="overview">Overview</a>
+      <a href="#/executions" data-nav="executions">Executions</a>
+      <a href="#/insights" data-nav="insights">Insights</a>
+    </nav>
+    <div class="controls" id="controls">
+      <span class="live" id="live" role="status"></span>
+    </div>
+  </header>
+  <main id="view" class="view" tabindex="-1">
+    <p class="loading">Loading…</p>
+  </main>
+  <aside id="drawer" class="drawer" tabindex="-1" aria-labelledby="drawer-title" hidden>
+    <div class="drawer-head">
+      <h2 id="drawer-title"></h2>
+      <button type="button" class="button button-quiet drawer-close" id="drawer-close" aria-label="Close details">Close</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

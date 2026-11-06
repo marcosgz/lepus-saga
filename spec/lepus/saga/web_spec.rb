@@ -1,0 +1,412 @@
+# frozen_string_literal: true
+
+require "rack/test"
+require "lepus/saga/web"
+
+RSpec.describe Lepus::Saga::Web do
+  include Rack::Test::Methods
+
+  let(:config) { Lepus::Saga::Web::Configuration.new }
+  let(:app) { described_class.build(config) }
+  let(:store) { Lepus::Saga.store }
+  let(:json_headers) { {"CONTENT_TYPE" => "application/json", "HTTP_X_LEPUS_SAGA" => "1", "HTTP_ORIGIN" => "http://example.org"} }
+
+  before do
+    stub_const("WebSpecCheckout", Class.new(Lepus::Saga::Definition) do
+      saga_name "orders.checkout"
+      partition "billing"
+
+      step :reserve, compensate: :release
+      step :charge, retry: {attempts: 4}
+      step :ship
+
+      def reserve = nil
+
+      def release = nil
+
+      def charge = nil
+
+      def ship = nil
+    end)
+  end
+
+  def create_execution(status: "running", current_step: "reserve", resource_id: "order-1", created_at: Time.current)
+    execution = store.create_execution(
+      saga_name: "orders.checkout", resource_type: "Order", resource_id: resource_id,
+      current_step: current_step, started_at: created_at, last_progress_at: created_at
+    )
+    store.update_execution(execution, status: status, created_at: created_at,
+      finished_at: (created_at if Lepus::Saga::ExecutionBehaviour::TERMINAL_STATUSES.include?(status)))
+  end
+
+  def json = JSON.parse(last_response.body)
+
+  def post_json(path, body = {}, headers = json_headers)
+    post(path, JSON.generate(body), headers)
+  end
+
+  describe "GET /api/me" do
+    it "reports the allowed actions and the poll settings" do
+      config.default_poll_interval = 15
+      config.title = "Order sagas"
+
+      get "/api/me"
+
+      expect(last_response.status).to eq(200)
+      expect(json).to include(
+        "title" => "Order sagas", "read_only" => false, "queries" => true, "poll_interval" => 15,
+        "poll_intervals" => [0, 2, 5, 15, 60], "actions" => {"retry" => true, "compensate" => true}
+      )
+    end
+  end
+
+  describe "GET /api/sagas" do
+    it "lists definitions with in-progress and stopped counts per step" do
+      create_execution(current_step: "charge")
+      create_execution(current_step: "charge")
+      create_execution(status: "failed", current_step: "ship")
+      create_execution(status: "completed", current_step: "ship")
+
+      get "/api/sagas"
+
+      saga = json["sagas"].find { |item| item["name"] == "orders.checkout" }
+      expect(saga).to include("known" => true, "partition" => "billing")
+      expect(saga["steps"]).to eq([
+        {"name" => "reserve", "compensate" => "release", "attempts" => 3},
+        {"name" => "charge", "compensate" => nil, "attempts" => 4},
+        {"name" => "ship", "compensate" => nil, "attempts" => 3}
+      ])
+      expect(saga["stations"]["charge"]).to include("running" => 2)
+      expect(saga["stations"]["ship"]).to include("failed" => 1)
+      expect(saga["totals"]).to eq("running" => 2, "failed" => 1, "completed" => 1)
+    end
+  end
+
+  describe "GET /api/executions" do
+    it "filters by saga, status, step and resource" do
+      running = create_execution(current_step: "charge", resource_id: "order-77")
+      create_execution(status: "failed", resource_id: "order-78")
+
+      get "/api/executions", saga: "orders.checkout", status: "running,compensating", step: "charge", resource: "77"
+
+      expect(json["executions"].map { |row| row["id"] }).to eq([running.id])
+      expect(json["executions"].first).to include("partition" => "billing", "status" => "running", "current_step" => "charge")
+      expect(json["next_before"]).to be_nil
+    end
+
+    it "pages backwards by id" do
+      ids = Array.new(3) { create_execution.id }.sort.reverse
+
+      get "/api/executions", limit: 2
+      first = json
+      get "/api/executions", limit: 2, before: first["next_before"]
+
+      expect(first["executions"].map { |row| row["id"] }).to eq(ids.first(2))
+      expect(first["next_before"]).to eq(ids[1])
+      expect(json["executions"].map { |row| row["id"] }).to eq([ids.last])
+      expect(json["next_before"]).to be_nil
+    end
+
+    it "filters by created_at" do
+      create_execution(created_at: 2.days.ago)
+      recent = create_execution(created_at: 1.hour.ago)
+
+      get "/api/executions", from: 1.day.ago.iso8601
+
+      expect(json["executions"].map { |row| row["id"] }).to eq([recent.id])
+    end
+
+    it "rejects malformed parameters" do
+      get "/api/executions", from: "yesterday"
+      expect(last_response.status).to eq(400)
+      expect(json["error"]).to include("from")
+
+      get "/api/executions", limit: "1000"
+      expect(last_response.status).to eq(400)
+    end
+  end
+
+  describe "GET /api/executions/:id" do
+    it "returns the execution with its context, attempts and other runs of the resource" do
+      execution = create_execution
+      other = create_execution
+      store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current)
+
+      get "/api/executions/#{execution.id}"
+
+      expect(json["execution"]).to include("id" => execution.id, "context" => {})
+      expect(json["definition"]["steps"].map { |step| step["name"] }).to eq(%w[reserve charge ship])
+      expect(json["attempts"].map { |attempt| attempt["step_name"] }).to eq(["reserve"])
+      expect(json["related"].map { |run| run["id"] }).to eq([other.id])
+    end
+
+    it "answers 404 for an unknown id" do
+      get "/api/executions/missing"
+
+      expect(last_response.status).to eq(404)
+    end
+  end
+
+  describe "insight endpoints" do
+    let(:execution) { create_execution(status: "failed", created_at: 30.minutes.ago) }
+
+    before do
+      attempt = store.create_step_attempt(execution, step_name: "charge", direction: "execute", epoch: 0, attempt: 1, started_at: 20.minutes.ago)
+      store.update_step_attempt(attempt, status: "failed", finished_at: 19.minutes.ago, duration_ms: 60_000.0,
+        error_class: "Timeout::Error", error_message: "gateway timeout")
+    end
+
+    it "serves the throughput series in buckets" do
+      get "/api/series", from: 1.hour.ago.iso8601, to: Time.current.iso8601
+
+      expect(json["bucket"]).to eq(60)
+      expect(json["rows"].sum { |row| row["started"] }).to eq(1)
+      expect(json["rows"].sum { |row| row["failed"] }).to eq(1)
+      expect(json["truncated"]).to be(false)
+    end
+
+    it "serves failures grouped by error, latency percentiles and stalled executions" do
+      get "/api/insights/failures"
+      expect(json["failures"]).to contain_exactly(include("error_class" => "Timeout::Error", "count" => 1, "sample_execution_id" => execution.id))
+
+      get "/api/insights/latency"
+      expect(json["rows"]).to contain_exactly(include("step_name" => "charge", "p50" => 60_000.0))
+
+      stalled = create_execution(created_at: 2.hours.ago)
+      get "/api/stalled", minutes: 30
+      expect(json["executions"].map { |row| row["id"] }).to eq([stalled.id])
+    end
+  end
+
+  describe "POST /api/executions/:id/retry" do
+    it "retries a failed execution" do
+      execution = create_execution(status: "failed", current_step: "charge")
+
+      post_json "/api/executions/#{execution.id}/retry"
+
+      expect(last_response.status).to eq(200)
+      expect(json["execution"]).to include("status" => "running", "epoch" => 1)
+      expect(saga_exchange.messages.size).to eq(1)
+    end
+
+    it "answers 409 when the execution cannot be retried" do
+      execution = create_execution(status: "completed")
+
+      post_json "/api/executions/#{execution.id}/retry"
+
+      expect(last_response.status).to eq(409)
+      expect(json["error"]).to eq("Cannot retry execution in status completed")
+    end
+
+    it "answers 404 for an unknown execution" do
+      post_json "/api/executions/missing/retry"
+
+      expect(last_response.status).to eq(404)
+    end
+
+    it "answers 409 without touching the execution when its saga is not loaded" do
+      execution = store.create_execution(saga_name: "invoices.issue", resource_type: "Invoice", resource_id: "inv-1", current_step: "issue")
+      store.update_execution(execution, status: "failed")
+
+      %w[retry compensate].each do |action|
+        post_json "/api/executions/#{execution.id}/#{action}"
+
+        expect(last_response.status).to eq(409)
+        expect(json["error"]).to eq("Saga invoices.issue is not loaded in this process")
+      end
+      expect(store.find_execution(execution.id)).to have_attributes(status: "failed", epoch: 0)
+      expect(saga_exchange.messages).to be_empty
+    end
+  end
+
+  describe "POST /api/executions/:id/compensate" do
+    it "compensates with the given reason" do
+      execution = create_execution(current_step: "charge")
+      store.finish_step_attempt(
+        store.create_step_attempt(execution, step_name: "reserve", direction: "execute", epoch: 0, attempt: 1, started_at: Time.current),
+        "succeeded"
+      )
+
+      post_json "/api/executions/#{execution.id}/compensate", {reason: "customer cancelled"}
+
+      expect(json["execution"]).to include("status" => "compensating", "current_step" => "reserve", "failure_reason" => "customer cancelled")
+    end
+  end
+
+  describe "cross-site protection" do
+    let(:execution) { create_execution(status: "failed") }
+
+    it "accepts a same-origin Referer when the browser sends no Origin" do
+      post_json "/api/executions/#{execution.id}/retry", {}, json_headers.except("HTTP_ORIGIN").merge("HTTP_REFERER" => "http://example.org/sagas/")
+
+      expect(last_response.status).to eq(200)
+    end
+
+    {
+      "without the custom header" => {"HTTP_X_LEPUS_SAGA" => nil},
+      "without a JSON content type" => {"CONTENT_TYPE" => "application/x-www-form-urlencoded"},
+      "from a foreign origin" => {"HTTP_ORIGIN" => "https://evil.example"},
+      "from a foreign referer" => {"HTTP_ORIGIN" => nil, "HTTP_REFERER" => "https://evil.example/page"},
+      "without an origin or referer" => {"HTTP_ORIGIN" => nil}
+    }.each do |description, overrides|
+      it "rejects a request #{description}" do
+        post_json "/api/executions/#{execution.id}/retry", {}, json_headers.merge(overrides).compact
+
+        expect(last_response.status).to eq(403)
+        expect(json["error"]).to eq("Cross-site request rejected")
+        expect(store.find_execution(execution.id).status).to eq("failed")
+      end
+    end
+  end
+
+  describe "authorization" do
+    it "refuses every request the hook does not allow to read" do
+      config.authorize = ->(_env, action) { action != :read }
+
+      get "/api/me"
+      expect(last_response.status).to eq(403)
+      expect(json["error"]).to eq("Forbidden")
+
+      get "/"
+      expect(last_response.status).to eq(403)
+    end
+
+    it "refuses an action the hook denies and reports it in /api/me" do
+      config.authorize = ->(env, action) { action != :retry || env["HTTP_X_ROLE"] == "admin" }
+      execution = create_execution(status: "failed")
+
+      get "/api/me"
+      expect(json["actions"]).to eq("retry" => false, "compensate" => true)
+
+      post_json "/api/executions/#{execution.id}/retry"
+      expect(last_response.status).to eq(403)
+
+      post_json "/api/executions/#{execution.id}/retry", {}, json_headers.merge("HTTP_X_ROLE" => "admin")
+      expect(last_response.status).to eq(200)
+    end
+
+    it "refuses actions and hides them when read-only" do
+      config.read_only = true
+      execution = create_execution(status: "failed")
+
+      get "/api/me"
+      expect(json).to include("read_only" => true, "actions" => {"retry" => false, "compensate" => false})
+
+      post_json "/api/executions/#{execution.id}/compensate"
+      expect(last_response.status).to eq(403)
+      expect(json["error"]).to eq("The console is read-only")
+    end
+  end
+
+  describe "routing" do
+    it "answers 404 for unknown paths and 405 for a wrong method" do
+      get "/api/nothing"
+      expect(last_response.status).to eq(404)
+      expect(json["error"]).to eq("Not found")
+
+      get "/api/executions/abc/retry"
+      expect(last_response.status).to eq(405)
+
+      post "/api/me"
+      expect(last_response.status).to eq(405)
+
+      get "/elsewhere"
+      expect(last_response.status).to eq(404)
+    end
+
+    it "answers 501 when the store has no query methods" do
+      allow(store).to receive(:list_executions).and_raise(NotImplementedError)
+
+      get "/api/executions"
+
+      expect(last_response.status).to eq(501)
+    end
+  end
+
+  describe "the page" do
+    it "points its base href at the mount path and escapes the title" do
+      config.title = "Sagas <prod>"
+
+      get "/", {}, "SCRIPT_NAME" => "/admin/sagas"
+
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include('<base href="/admin/sagas/">')
+      expect(last_response.body).to include("<title>Sagas &lt;prod&gt;</title>")
+      expect(last_response.body).to match(%r{href="assets-\h{16}/app\.css"})
+      expect(last_response.headers["content-security-policy"]).to include("default-src 'self'", "script-src 'self'")
+      expect(last_response.headers["x-content-type-options"]).to eq("nosniff")
+    end
+
+    it "serves the page from the root when mounted there" do
+      get "/"
+
+      expect(last_response.body).to include('<base href="/">')
+    end
+
+    it "works when mounted through Rack::Builder#map" do
+      inner = app
+      mounted = Rack::Builder.new { map("/ops/sagas") { run inner } }.to_app
+
+      response = Rack::MockRequest.new(mounted).get("/ops/sagas/")
+
+      expect(response.body).to include('<base href="/ops/sagas/">')
+    end
+  end
+
+  describe "static assets" do
+    let(:asset_path) { last_response.body[%r{assets-\h{16}/app\.css}] }
+
+    before { get "/" }
+
+    it "caches digested paths for a year and answers 304 to a matching ETag" do
+      get "/#{asset_path}"
+
+      expect(last_response.status).to eq(200)
+      expect(last_response.headers["content-type"]).to eq("text/css")
+      expect(last_response.headers["cache-control"]).to include("immutable")
+      etag = last_response.headers["etag"]
+
+      get "/#{asset_path}", {}, "HTTP_IF_NONE_MATCH" => etag
+      expect(last_response.status).to eq(304)
+      expect(last_response.body).to be_empty
+    end
+
+    it "revalidates plain asset paths and stale digests" do
+      get "/assets/js/main.js"
+      expect(last_response.status).to eq(200)
+      expect(last_response.headers["cache-control"]).to eq("no-cache")
+      expect(last_response.headers["content-type"]).to include("javascript")
+
+      get "/assets-0000000000000000/app.css"
+      expect(last_response.headers["cache-control"]).to eq("no-cache")
+    end
+
+    it "serves the vendored fonts" do
+      get "/assets/fonts/barlow-semi-condensed/barlow-semi-condensed-600.woff2"
+
+      expect(last_response.status).to eq(200)
+      expect(last_response.body.byteslice(0, 4)).to eq("wOF2")
+    end
+
+    it "never serves files outside the assets directory" do
+      get "/assets/../index.html"
+      expect(last_response.status).to eq(404)
+
+      get "/assets/%2e%2e/%2e%2e/lib/lepus/saga.rb"
+      expect(last_response.status).to eq(404)
+    end
+  end
+
+  describe ".call" do
+    after { described_class.reset! }
+
+    it "builds the app from the global configuration" do
+      described_class.configure { |web| web.title = "Global" }
+
+      status, _headers, body = described_class.call(Rack::MockRequest.env_for("/api/me"))
+
+      expect(status).to eq(200)
+      expect(JSON.parse(body.each.to_a.join)["title"]).to eq("Global")
+    end
+  end
+end

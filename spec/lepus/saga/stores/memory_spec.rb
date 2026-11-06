@@ -5,6 +5,7 @@ RSpec.describe Lepus::Saga::Stores::Memory do
 
   it_behaves_like "a lepus saga store"
   it_behaves_like "a lepus saga engine"
+  it_behaves_like "a lepus saga query store"
 
   it "forgets everything on clear!" do
     execution = store.create_execution(saga_name: "s", resource_type: "R", resource_id: "1", started_at: Time.current)
