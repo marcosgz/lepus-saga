@@ -46,6 +46,7 @@
   --stop: #b5321f;
   --reverse: #4a58a3;
   --on-signal: #ffffff;
+  --brand-amber: #f2a30f;
   --shadow: 0 8px 28px rgb(29 42 46 / 0.18);
 
   --font-sign: "Barlow Semi Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
@@ -191,9 +192,9 @@ svg :focus-visible { outline: none; }
   white-space: nowrap;
 }
 
-.brand-rail, .brand-post { fill: none; stroke: var(--ink); stroke-width: 2.25; stroke-linecap: round; }
-.brand-arm { fill: var(--stop); }
-.brand-lamp { fill: var(--panel); stroke: var(--ink); stroke-width: 2; }
+.brand-mark { flex: none; color: var(--ink); }
+.brand-line { fill: none; stroke: currentColor; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
+.brand-dot { fill: var(--brand-amber); }
 
 .views { display: flex; align-self: stretch; }
 

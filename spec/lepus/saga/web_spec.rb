@@ -388,6 +388,14 @@ RSpec.describe Lepus::Saga::Web do
       expect(last_response.body.byteslice(0, 4)).to eq("wOF2")
     end
 
+    it "serves the brand icons" do
+      get "/assets/favicon.svg"
+      expect(last_response.headers["content-type"]).to eq("image/svg+xml")
+
+      get "/assets/apple-touch-icon.png"
+      expect(last_response.headers["content-type"]).to eq("image/png")
+    end
+
     it "never serves files outside the assets directory" do
       get "/assets/../index.html"
       expect(last_response.status).to eq(404)

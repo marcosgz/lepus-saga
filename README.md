@@ -1,4 +1,9 @@
-# Lepus::Saga
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-lepus-saga-on-dark.svg">
+    <img alt="Lepus saga" src="docs/brand/lockup-lepus-saga-on-light.svg" width="359">
+  </picture>
+</h1>
 
 Linear sagas on top of [Lepus](https://github.com/marcosgz/lepus).
 
