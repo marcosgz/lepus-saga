@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.summary = "Saga orchestration on top of Lepus"
   spec.description = "Linear sagas with persisted executions, step attempts, retries, compensations and a stuck-execution healer, driven by Lepus/RabbitMQ. Storage is pluggable: lepus-saga-active_record provides ActiveRecord."
   spec.homepage = "https://github.com/marcosgz/lepus-saga"
-  spec.license = "MIT"
+  spec.license = "GPL-3.0-or-later"
   spec.required_ruby_version = ">= 3.3.0"
 
   spec.metadata["homepage_uri"] = spec.homepage
